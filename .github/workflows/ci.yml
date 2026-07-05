@@ -58,3 +58,29 @@ jobs:
 
       - name: Run Zig HTTP workload runner against the real C server
         run: zig build test-http -- zig-out/bin/httpserver
+
+  sanitizers:
+    # TSan-only (see test_scripts/san_stress.sh's header comment): ASan stays
+    # a local/manual tool since valgrind already gates memory safety in M4.
+    # TSan is the genuinely new coverage -- concurrency invariants the
+    # black-box suites can't observe unless a race happens to perturb
+    # response ordering.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          # python3-toml via apt: plain `pip install` hits PEP 668
+          # (externally-managed-environment) on ubuntu-24.04 runners
+          sudo apt-get install -y net-tools python3-toml
+
+      - name: Run TSan stress suite
+        run: test_scripts/san_stress.sh thread 10

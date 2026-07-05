@@ -32,10 +32,22 @@ fi
 # including the main dispatcher). The old `ps -o thcount | cut -d' ' -f5`
 # yielded an empty string for 2-digit counts (mis-tokenized columns) and
 # never gated. Convention: N workers (-t value) + 1 dispatcher(main) = N+1.
+#
+# TSan-instrumented builds (test_scripts/san_stress.sh thread, DECISIONS.md
+# D20) run one extra OS thread: ThreadSanitizer's runtime spawns its own
+# background housekeeping thread, so the observed count is N+2 rather than
+# the product's N+1. That's the sanitizer runtime, not the server, so the
+# expected counts get +1 when the staged ./httpserver binary is
+# TSan-instrumented (detected via its __tsan_init symbol; grep -q works on
+# the binary directly, no nm needed).
+tsan_extra=0
+if grep -q __tsan_init ./httpserver; then
+    tsan_extra=1
+fi
 rc=0
 count=`ls /proc/$pid/task | wc -l`
-if [ "$count" -ne 3 ]; then
-    msg="Server created $count threads instead of 3 (-t 2 => 2 workers + 1 dispatcher)\n"
+if [ "$count" -ne $((3 + tsan_extra)) ]; then
+    msg="Server created $count threads instead of $((3 + tsan_extra)) (-t 2 => 2 workers + 1 dispatcher)\n"
     rc=1
 fi
 
@@ -69,8 +81,8 @@ fi
 
 # NB: do NOT reset rc here -- resetting made only the last check gate.
 count=`ls /proc/$pid/task | wc -l`
-if [ "$count" -ne 4 ]; then
-    msg="${msg}Server created $count threads instead of 4 (default => 3 workers + 1 dispatcher)\n"
+if [ "$count" -ne $((4 + tsan_extra)) ]; then
+    msg="${msg}Server created $count threads instead of $((4 + tsan_extra)) (default => 3 workers + 1 dispatcher)\n"
     rc=1
 fi
 
@@ -104,8 +116,8 @@ fi
 
 # NB: do NOT reset rc here either (see above).
 count=`ls /proc/$pid/task | wc -l`
-if [ "$count" -ne 9 ]; then
-    msg="${msg}Server created $count threads instead of 9 (-t 8 => 8 workers + 1 dispatcher)\n"
+if [ "$count" -ne $((9 + tsan_extra)) ]; then
+    msg="${msg}Server created $count threads instead of $((9 + tsan_extra)) (-t 8 => 8 workers + 1 dispatcher)\n"
     rc=1
 fi
 

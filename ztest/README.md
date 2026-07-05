@@ -120,6 +120,17 @@ that taxonomy: real server, real sockets, real log verification -- just
 built bottom-up from what `workloads/*.toml` already encode rather than
 from scratch.
 
+The white-box `@cImport` items above stayed a parked decision until
+2026-07-04, when the user ruled a narrower path instead ("C-lite", see
+`docs/DECISIONS.md` D20 and `docs/ZTEST.md` §4's RESOLVED note): rather than
+build a new `@cImport` harness, `test_scripts/san_stress.sh` runs this
+repo's *existing* black-box suites (`test_repo.sh` + a looped
+`conflict_stress_mix` workload) against `zig build -Dsan=thread|address`
+builds of the C server, with a TSan-only CI job. That also required fixing
+`build.zig`'s `-Dsan=` toggle itself, which had only ever instrumented the C
+*compile* step and never linked a sanitizer runtime. The white-box taxonomy
+above is otherwise unchanged and still not built.
+
 ## Validated against
 
 - The bundled mock server (`ztest/mock/main.zig`): full suite green,

@@ -20,7 +20,39 @@ pub fn build(b: *std.Build) void {
     // the black-box ztest runner below; see ztest/README.md for how the
     // two relate and why it isn't built yet (the C symbols it would call
     // don't exist/compile until the C track's M1 lands).
+    //
+    // IMPORTANT (task C-lite): the original version of this toggle only ever
+    // appended `-fsanitize=$san` to the *C compile* flags. That instruments
+    // the object files but does nothing at link time, so the resulting
+    // `zig-out/bin/httpserver` was silently uninstrumented -- linking it
+    // failed outright once source files that actually race/leak existed
+    // (verified: `-Dsan=thread` failed with "undefined symbol: __tsan_init"
+    // et al., because Zig links its bundled libtsan runtime only when told to
+    // via the Module-level `.sanitize_thread` field, not via a raw C flag).
+    // Fixed per-sanitizer below:
+    //   thread    -> `exe_mod.sanitize_thread = true` (idiomatic; Zig bundles
+    //                its own libtsan and links it automatically -- verified
+    //                via `nm` showing `__tsan_init`/`__tsan_read4`/etc. in
+    //                the output binary).
+    //   undefined -> `exe_mod.sanitize_c = .full` (idiomatic; Zig bundles its
+    //                own `ubsan_rt.zig` the same way).
+    //   address   -> Zig 0.15.2 has no bundled ASan runtime at all (no
+    //                libclang_rt.asan anywhere under `zig lib`); even a bare
+    //                `zig cc -fsanitize=address` on a trivial C file fails to
+    //                link with the same class of undefined-symbol errors
+    //                (`__asan_init`, `__asan_report_load1`, ...). There is no
+    //                idiomatic zig-native mechanism to fall back on, so this
+    //                variant shells out to the system `clang` (the same
+    //                compiler `Makefile` already hardcodes `CC=clang` to) via
+    //                `addSystemCommand`: a full clang invocation is a real
+    //                linker driver and auto-links its own compiler-rt ASan
+    //                archive, which zig's internal linker does not.
     const san = b.option([]const u8, "san", "none|address|thread|undefined (instruments the C httpserver build)") orelse "none";
+    if (!std.mem.eql(u8, san, "none") and !std.mem.eql(u8, san, "address") and
+        !std.mem.eql(u8, san, "thread") and !std.mem.eql(u8, san, "undefined"))
+    {
+        std.debug.panic("-Dsan must be one of none|address|thread|undefined, got '{s}'", .{san});
+    }
 
     // ---- The C httpserver -------------------------------------------------
     const exe_mod = b.createModule(.{
@@ -38,6 +70,16 @@ pub fn build(b: *std.Build) void {
     exe_mod.linkSystemLibrary("pthread", .{});
     exe_mod.addIncludePath(b.path("lib"));
 
+    // TSan/UBSan: idiomatic Module-level toggles. These make Zig itself
+    // instrument the C compile *and* link its bundled runtime -- see the
+    // block comment above `san`'s declaration for why this differs from
+    // (and replaces) a raw `-fsanitize=...` C flag.
+    if (std.mem.eql(u8, san, "thread")) {
+        exe_mod.sanitize_thread = true;
+    } else if (std.mem.eql(u8, san, "undefined")) {
+        exe_mod.sanitize_c = .full;
+    }
+
     var c_flags = std.ArrayList([]const u8).empty;
     c_flags.appendSlice(b.allocator, &.{
         "-Wall",
@@ -48,8 +90,9 @@ pub fn build(b: *std.Build) void {
         // compile the C sources against the same language standard.
         "-std=gnu17",
     }) catch @panic("OOM");
-    if (!std.mem.eql(u8, san, "none")) {
-        c_flags.append(b.allocator, b.fmt("-fsanitize={s}", .{san})) catch @panic("OOM");
+    if (std.mem.eql(u8, san, "thread") or std.mem.eql(u8, san, "undefined")) {
+        // Better stack traces in sanitizer reports; the sanitizer itself is
+        // already wired via the Module fields above, not a C flag here.
         c_flags.append(b.allocator, "-fno-omit-frame-pointer") catch @panic("OOM");
     }
 
@@ -68,12 +111,54 @@ pub fn build(b: *std.Build) void {
         sources.append(b.allocator, b.fmt("src/{s}", .{entry.name})) catch @panic("OOM");
     }
 
-    exe_mod.addCSourceFiles(.{
-        .files = sources.items,
-        .flags = c_flags.items,
-    });
+    if (std.mem.eql(u8, san, "address")) {
+        // See the block comment above `san`'s declaration: Zig has no
+        // bundled ASan runtime to link against, so this variant is built by
+        // shelling out to the system `clang` directly (a real linker driver
+        // that auto-links its own compiler-rt ASan archive) instead of going
+        // through `exe`/`exe_mod`. `exe` above is left an ordinary,
+        // unsanitized build (still installed/runnable via `zig build run`)
+        // so this branch doesn't fight it for the same output path.
+        std.fs.cwd().makePath("zig-out/bin") catch |err| {
+            std.debug.panic("failed to create zig-out/bin: {t}", .{err});
+        };
 
-    b.installArtifact(exe);
+        var asan_argv = std.ArrayList([]const u8).empty;
+        asan_argv.appendSlice(b.allocator, &.{
+            "clang",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-pedantic",
+            "-std=gnu17",
+            "-pthread",
+            "-Ilib",
+            "-fsanitize=address",
+            "-fno-omit-frame-pointer",
+            "-o",
+            "zig-out/bin/httpserver",
+        }) catch @panic("OOM");
+        asan_argv.appendSlice(b.allocator, sources.items) catch @panic("OOM");
+
+        const asan_cmd = b.addSystemCommand(asan_argv.items);
+        b.getInstallStep().dependOn(&asan_cmd.step);
+
+        // `exe` is still an ordinary (unsanitized) build for `zig build run`
+        // convenience; it must not also try to install to zig-out/bin/httpserver
+        // in this branch (that would race the clang-produced ASan binary for
+        // the same path), so it's compiled but not installed here.
+        exe_mod.addCSourceFiles(.{
+            .files = sources.items,
+            .flags = c_flags.items,
+        });
+    } else {
+        exe_mod.addCSourceFiles(.{
+            .files = sources.items,
+            .flags = c_flags.items,
+        });
+
+        b.installArtifact(exe);
+    }
 
     const run_cmd = b.addRunArtifact(exe);
     if (b.args) |args| run_cmd.addArgs(args);

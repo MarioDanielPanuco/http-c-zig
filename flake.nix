@@ -45,7 +45,12 @@
             gnumake
             clang
             clang-tools
-            zig
+            # Pinned to 0.15 explicitly (not the `zig` alias): nixpkgs-unstable's
+            # `zig` attr floated to 0.16.0 on this flake.lock's pinned nixpkgs
+            # revision, which breaks build.zig (0.16 moved std.fs.cwd() etc. to
+            # std.Io.Dir). CI (.github/workflows/ci.yml) pins the same 0.15.2 via
+            # mlugg/setup-zig@v2 -- keep this in lockstep with that.
+            zig_0_15
             (python3.withPackages (ps: [ ps.toml ]))
             unixtools.netstat
             nettools
