@@ -43,7 +43,7 @@ const SMOKE_TOML =
     \\[[events]]
     \\type = "CREATE"
     \\method = "PUT"
-    \\uri = "ztest_smoke.txt"
+    \\uri = "ztest-smoke.txt"
     \\infile = "ztest/src/main.zig"
     \\id = 0
     \\
@@ -58,7 +58,7 @@ const SMOKE_TOML =
     \\[[events]]
     \\type = "CREATE"
     \\method = "PUT"
-    \\uri = "ztest_smoke.txt"
+    \\uri = "ztest-smoke.txt"
     \\infile = "ztest/src/main.zig"
     \\id = 1
     \\
@@ -73,7 +73,7 @@ const SMOKE_TOML =
     \\[[events]]
     \\type = "CREATE"
     \\method = "GET"
-    \\uri = "ztest_smoke.txt"
+    \\uri = "ztest-smoke.txt"
     \\id = 2
     \\
     \\[[events]]
@@ -87,7 +87,7 @@ const SMOKE_TOML =
     \\[[events]]
     \\type = "CREATE"
     \\method = "GET"
-    \\uri = "ztest_smoke_missing.txt"
+    \\uri = "ztest-smoke-missing.txt"
     \\id = 3
     \\
     \\[[events]]

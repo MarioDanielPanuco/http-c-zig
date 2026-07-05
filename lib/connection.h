@@ -34,6 +34,12 @@ char *conn_get_uri(conn_t *conn);
 // implemented for header named "Content-Length" and "Request-Id".
 char *conn_get_header(conn_t *conn, char *header);
 
+// M4 (review backlog B3): true if conn_parse ever read zero bytes from the
+// client (a bare connect-then-close, not a request at all). Callers use this
+// to distinguish "no request was sent" (close silently, no response, no audit
+// line -- the spec ruling) from an actual malformed request (400 + audit).
+bool conn_is_empty(conn_t *conn);
+
 //////////////////////////////////////////////////////////////////////
 // Functions that help get data from a connection
 

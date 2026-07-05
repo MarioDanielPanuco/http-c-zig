@@ -10,6 +10,7 @@
 #include <err.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -51,7 +52,8 @@ void handle_unsupported(conn_t *conn);
 // in-process table. Lockfiles live outside the serve directory, so no
 // workload URI (resolved relative to cwd) can collide with them. Within the
 // directory the URI->lockfile mapping replaces '/' with '%'; '%' is outside
-// the URI charset ([a-zA-Z0-9/_.]), so the mapping is injective.
+// the URI charset ([a-zA-Z0-9/_.-], see docs/DECISIONS.md D14), so the
+// mapping is injective.
 //
 // Lockfiles are opened per request and closed after unlock (no cache, no
 // cleanup problem; fd churn is acceptable). They are never truncated, never
@@ -61,14 +63,38 @@ void handle_unsupported(conn_t *conn);
 // the lock in two.
 static char lock_dir[96];
 
+// M4 (review backlog B5): mkdir's EEXIST tells us *a* directory entry is
+// already there, not that it is safe to use -- /tmp is world-writable, so
+// another user could have pre-created (or symlinked) this exact path ahead of
+// us. After EEXIST, lstat the path (not stat: don't follow a symlink planted
+// by an attacker) and require it to be a real directory we own before trusting
+// it as the lock namespace; otherwise fail startup with a clear diagnostic
+// rather than silently flock-ing through a squatted path.
 static int lockdir_init(void) {
     struct stat st;
     if (stat(".", &st) < 0)
         return -1;
     snprintf(lock_dir, sizeof(lock_dir), "/tmp/.httpserver.locks.%ju.%ju", (uintmax_t)st.st_dev,
              (uintmax_t)st.st_ino);
-    if (mkdir(lock_dir, 0700) < 0 && errno != EEXIST)
+
+    if (mkdir(lock_dir, 0700) == 0)
+        return 0;
+    if (errno != EEXIST) {
+        warn("mkdir %s", lock_dir);
         return -1;
+    }
+
+    struct stat lock_st;
+    if (lstat(lock_dir, &lock_st) < 0) {
+        warn("lstat %s", lock_dir);
+        return -1;
+    }
+    if (!S_ISDIR(lock_st.st_mode) || lock_st.st_uid != geteuid()) {
+        warnx("refusing to use %s: exists but is not a directory we own "
+              "(possible /tmp squatting)",
+              lock_dir);
+        return -1;
+    }
     return 0;
 }
 
@@ -106,6 +132,47 @@ static void uri_unlock(int lockfd) {
     }
 }
 
+//////////////////////////////////////////////////////////////////////
+// SIGTERM/SIGINT handling for audit-log durability (M4 plan item 2; the
+// commented-out placeholder handlers at the old httpserver.c L84-85).
+//
+// The spec requires log entries to be durable across a SIGTERM: "your server
+// must ensure that log entries are resident in the log after we send your
+// server a SIGTERM signal." log_audit already fflushes every line as it's
+// written (docs/DECISIONS.md D10), so durability is already satisfied by the
+// time any signal arrives; what a handler adds is a *clean exit* instead of
+// the default disposition (immediate termination without a chance to close a
+// `-l` logfile's stream, or -- if the plan called for it -- to drain more
+// state).
+//
+// Design (per posix-threading skill): a signal handler body is restricted to
+// async-signal-safe calls, and log_close()/fclose() are not on that list, so
+// this does *not* run cleanup from a signal handler. Instead, SIGTERM and
+// SIGINT are blocked (via pthread_sigmask) before any worker thread is
+// created, so every thread in the process -- dispatcher and workers alike --
+// inherits the block. A dedicated thread then sits in sigwait() on exactly
+// those two signals; sigwait() is not a signal handler, so it runs with the
+// full C library available. When it wakes, it flushes/closes the audit log
+// and calls exit(), which tears down the whole process (closing every fd,
+// releasing every flock/lockfile the workers may be holding) -- there is
+// nothing to "stop accepting" separately, because the dispatcher's accept()
+// loop and every in-flight worker die with the process.
+//
+// Repeated SIGINT/SIGTERM cannot deadlock: the signal stays blocked in every
+// thread for the process's entire remaining lifetime (nothing ever unblocks
+// it), so a second delivery is simply queued/coalesced by the kernel and
+// never reaches a second sigwait() call or handler body -- there is no lock
+// this path acquires that a repeat delivery could contend.
+static sigset_t shutdown_set;
+
+static void *signal_wait_thread(void *arg) {
+    (void)arg;
+    int sig = 0;
+    sigwait(&shutdown_set, &sig);
+    log_close(); // flush + close a `-l` logfile (fflush already keeps stderr durable per-line)
+    exit(EXIT_SUCCESS);
+}
+
 int main(int argc, char **argv) {
     struct OPT opts;
     if (opt_parse(argc, argv, &opts) != 0)
@@ -120,14 +187,28 @@ int main(int argc, char **argv) {
     log_init(log_stream);
 
     if (lockdir_init() < 0)
-        err(EXIT_FAILURE, "failed to create lock directory");
+        return EXIT_FAILURE; // lockdir_init already printed a specific diagnostic
 
     // A client hanging up mid-response must not kill the server.
     signal(SIGPIPE, SIG_IGN);
 
+    // Block SIGTERM/SIGINT in this thread *before* spawning the pool's
+    // workers or the signal-waiting thread below, so every thread the process
+    // ever has inherits the block (see the design note above).
+    sigemptyset(&shutdown_set);
+    sigaddset(&shutdown_set, SIGTERM);
+    sigaddset(&shutdown_set, SIGINT);
+    if (pthread_sigmask(SIG_BLOCK, &shutdown_set, NULL) != 0)
+        err(EXIT_FAILURE, "pthread_sigmask");
+
     threadpool_t *pool = threadpool_new(opts.n_threads, opts.n_threads, handle_connection);
     if (pool == NULL)
         errx(EXIT_FAILURE, "failed to create thread pool");
+
+    pthread_t sig_tid;
+    if (pthread_create(&sig_tid, NULL, signal_wait_thread, NULL) != 0)
+        errx(EXIT_FAILURE, "failed to create signal-handling thread");
+    pthread_detach(sig_tid);
 
     Listener_Socket sock;
     if (listener_init(&sock, opts.port) < 0)
@@ -154,6 +235,19 @@ void handle_connection(int connfd) {
     const Response_t *res = conn_parse(conn);
 
     if (res != NULL) {
+        // M4 (review backlog B3, spec ruling): a bare connect-then-close (no
+        // bytes ever sent) is not a request -- nothing was asked of the
+        // server, so there is nothing to answer or audit. Close silently.
+        // (This is also what the M6 zig harness's own liveness probe does to
+        // the server, and had to be filtered out downstream -- docs/DECISIONS
+        // D11 item 2 -- precisely because a real audit line for it corrupts
+        // the ordering/replay checks; the ruling here fixes it at the source.)
+        if (conn_is_empty(conn)) {
+            conn_delete(&conn);
+            close(connfd);
+            return;
+        }
+
         // 501 (unsupported method) takes precedence over 505 (bad version):
         // if both conditions are true, return 501.
         if (res == &RESPONSE_VERSION_NOT_SUPPORTED &&

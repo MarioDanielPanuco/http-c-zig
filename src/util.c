@@ -1,93 +1,23 @@
-#include "../lib/util.h"
+// IO helper implementations declared in lib/asgn2_helper_funcs.h.
+//
+// M4 dead-code prune: this file used to also carry a batch of never-called
+// asgn2-era helpers (removeSlash, minimum, error_msg, sigterm_handler,
+// sigint_handler, isFile, fileChecking, fSize, print_error, errno_check,
+// read_all) plus lib/util.h, the header that declared them. A full-repo grep
+// turned up zero callers for any of them: src/connection.c gets read_until/
+// write_all/pass_bytes straight from asgn2_helper_funcs.h, and SIGTERM/SIGINT
+// are now handled properly in src/httpserver.c (see its signal_wait_thread),
+// making the old handler stubs (which called exit() from signal-handler
+// context -- not async-signal-safe) both dead and unsafe. lib/util.h itself
+// had no other includer once these were gone, so it was deleted rather than
+// left as a pass-through to asgn2_helper_funcs.h.
+#include "../lib/asgn2_helper_funcs.h"
 
 #include <errno.h>
 #include <string.h>
+#include <unistd.h>
 
-char *removeSlash(char *str) {
-    if (str[0] == '/') {
-        str += 1;
-    }
-    return str;
-}
-
-int minimum(int a, int b) {
-    return a < b ? a : b;
-}
-
-// Security note (see docs/REFERENCE.md gem #3): write the *exact* message to
-// stderr and exit -- no fprintf/format string built from untrusted input.
-// The original asgn2 version used `sizeof(msg) / sizeof(msg[0])`, which on a
-// `char *` parameter computes sizeof(char*)/sizeof(char) (8 on most 64-bit
-// platforms) instead of the string length -- a known asgn2 defect
-// (docs/REFERENCE.md "sizeof applied to pointer"). Fixed here to strlen(msg).
-int error_msg(char *msg) {
-    write_all(STDERR_FILENO, msg, strlen(msg));
-    exit(EXIT_FAILURE);
-    return 0;
-}
-
-void sigterm_handler(int sig) {
-    if (sig == SIGTERM) {
-        warnx("SIGTERM");
-        exit(EXIT_SUCCESS);
-    }
-}
-
-void sigint_handler(int sig) {
-    if (sig == SIGINT) {
-        warnx("SIGINT");
-        exit(EXIT_SUCCESS);
-    }
-}
-
-int isFile(char *filename) {
-    if (access(filename, F_OK) == 0) {
-        struct stat filenameStat;
-        stat(filename, &filenameStat);
-        return S_ISREG(filenameStat.st_mode);
-    }
-    return NEW_FILE;
-}
-
-int fileChecking(void) {
-    if (errno == ENOENT)
-        return 404;
-    return SUCCESS;
-}
-
-int fSize(int fd) {
-    struct stat sBuf;
-    if (fstat(fd, &sBuf)) {
-        return -1;
-    }
-    return (int)sBuf.st_size;
-}
-
-void print_error(char *string, int errorCode) {
-    (void)string;
-    exit(errorCode);
-}
-
-int errno_check(void) {
-    if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        return INTERNAL_SERVER_ERROR;
-    }
-    return SUCCESS;
-}
-
-ssize_t read_all(int connfd, char *buffer) {
-    ssize_t readCode = 1;
-    ssize_t totalRead = 0;
-
-    ssize_t n = BUFFER_SIZE + 5;
-    while ((readCode = read(connfd, buffer + totalRead, n - totalRead)) > 0) {
-        totalRead += readCode;
-        if (totalRead == n) {
-            return totalRead;
-        }
-    }
-    return totalRead;
-}
+#define BUFFER_SIZE 4096
 
 // write_all: loop until every byte is written or a real error occurs.
 // Retries on EINTR (a signal interrupting the write is not a failure).

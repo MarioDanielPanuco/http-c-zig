@@ -18,8 +18,21 @@ void log_init(FILE *stream) {
 
 void log_audit(const char *oper, const char *uri, int status, const char *rid) {
     pthread_mutex_lock(&log_mu);
-    fprintf(log_stream, "%s,%s,%d,%s\n", oper, uri, status, rid);
-    fflush(log_stream);
+    // Shutdown race guard (post-review fix): with `-l`, log_close() fcloses
+    // the stream and sets log_stream = NULL under this same mutex, then the
+    // signal thread calls exit(). A worker already blocked on log_mu can win
+    // the lock in the window before exit() finishes tearing the process down;
+    // without this check it would fprintf(NULL, ...) and crash. Dropping the
+    // line is correct here -- the process is exiting and the line could never
+    // become durable in a closed file anyway -- a segfault is not. The stderr
+    // path never hits this: log_close() only fcloses/NULLs streams it doesn't
+    // share with the C runtime (`log_stream != stderr` is checked before the
+    // fclose), so when auditing to stderr the pointer stays valid for the
+    // process's whole life.
+    if (log_stream != NULL) {
+        fprintf(log_stream, "%s,%s,%d,%s\n", oper, uri, status, rid);
+        fflush(log_stream);
+    }
     pthread_mutex_unlock(&log_mu);
 }
 

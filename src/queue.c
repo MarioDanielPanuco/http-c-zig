@@ -1,15 +1,18 @@
 
 // Standard Headers
 #include <stdbool.h>
-#include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
 
 // Local Headers
 #include "../lib/queue.h"
 
 #include <assert.h>
 #include <semaphore.h>
+
+// M4 dead-code prune: queue_empty/queue_full/printQueue were never declared
+// in lib/queue.h and never called by src/threadpool.c or anywhere else (a
+// full grep confirmed zero callers) -- removed along with the now-unused
+// <stdio.h>/<unistd.h> includes they were the only users of.
 
 // M3: the three semaphores now live *inside* the queue struct rather than as
 // file-global `sem_t`s. With file-globals, a second `queue_new` re-`sem_init`s
@@ -99,26 +102,4 @@ void queue_delete(queue_t **q) {
 
     free(*q);
     *q = NULL;
-}
-
-bool queue_empty(queue_t *q) {
-    if (q == NULL)
-        return false;
-    return q->count == 0;
-}
-
-bool queue_full(queue_t *q) {
-    if (q == NULL)
-        return false;
-    return q->size == q->count;
-}
-
-void printQueue(queue_t *q) {
-    int index = q->head;
-    fprintf(stdout, "%s", "Queue: ");
-    for (int i = 0; i < q->count; i++) {
-        fprintf(stdout, "%p ", q->buffer[index]);
-        index = (index + 1) % q->size;
-    }
-    fprintf(stdout, "%s\n", "");
 }

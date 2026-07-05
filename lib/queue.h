@@ -58,10 +58,3 @@ bool queue_push(queue_t *q, void *elem);
  *          should succeed unless the q parameter is NULL.
  */
 bool queue_pop(queue_t *q, void **elem);
-
-/** @brief Takes in a queue pointer and prints the contents of the queue in order (head to tail)
- *
- * @param q: queue to be printed
- * @return void
- */
-void printQueue(queue_t *q);
