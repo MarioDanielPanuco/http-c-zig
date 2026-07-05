@@ -4,6 +4,7 @@ old_proj_states/asgn4/test_files/large_binary.dat
 
 # Build outputs
 /httpserver
+/result
 *.o
 .zig-cache/
 zig-out/
