@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          # python3-toml via apt: plain `pip install` hits PEP 668
+          # (externally-managed-environment) on ubuntu-24.04 runners
+          sudo apt-get install -y net-tools python3-toml
+
+      - name: Build
+        run: make clean && make
+
+      - name: Run test harness
+        run: ./test_repo.sh
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs
+          path: |
+            outs/
+            auditlog
+            oliver.out
+            stdout.txt
+          if-no-files-found: ignore
+
+  zig-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Run Zig unit tests
+        run: zig build test
+
+      - name: Build C server with Zig
+        run: zig build
+
+      - name: Run Zig HTTP workload runner
+        run: zig build test-http
