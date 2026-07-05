@@ -32,9 +32,11 @@ pub fn build(b: *std.Build) void {
         .name = "httpserver",
         .root_module = exe_mod,
     });
-    exe.linkLibC();
-    exe.linkSystemLibrary("pthread");
-    exe.addIncludePath(b.path("lib"));
+    // Module-level APIs (not the old Compile-level ones): libc comes from
+    // .link_libc above; these two survive both zig 0.15 and 0.16-dev, where
+    // the Compile-level variants (exe.linkLibC() etc.) were removed.
+    exe_mod.linkSystemLibrary("pthread", .{});
+    exe_mod.addIncludePath(b.path("lib"));
 
     var c_flags = std.ArrayList([]const u8).empty;
     c_flags.appendSlice(b.allocator, &.{
@@ -66,7 +68,7 @@ pub fn build(b: *std.Build) void {
         sources.append(b.allocator, b.fmt("src/{s}", .{entry.name})) catch @panic("OOM");
     }
 
-    exe.addCSourceFiles(.{
+    exe_mod.addCSourceFiles(.{
         .files = sources.items,
         .flags = c_flags.items,
     });
@@ -136,8 +138,7 @@ pub fn build(b: *std.Build) void {
         // Default: point the runner at the mock server we just built, so
         // `zig build test-http` works out of the box with no arguments.
         // addArtifactArg wires up the dependency on mock_exe without
-        // pulling in the (currently broken) C httpserver via the global
-        // install step.
+        // pulling in the C httpserver via the global install step.
         run_runner.addArtifactArg(mock_exe);
     }
 
