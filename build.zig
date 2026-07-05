@@ -263,4 +263,31 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_bench.addArgs(args);
     const bench_step = b.step("differential", "Replay a workload against two servers and diff HTTP semantics (args: <workload.toml> <hostA:portA> <hostB:portB> <serve_root>)");
     bench_step.dependOn(&run_bench.step);
+
+    // ---- bench: the Zig-native load generator ----------------------------
+    // `zig build loadgen -- <host:port> GET|PUT <path> [-c N] [-d SECS|-n REQS]
+    // [-b BODY]` drives closed-loop, one-request-per-connection load matching
+    // httpserver's model natively (no oha --disable-keepalive fudge, no wrk
+    // reconnect artifacts). Imports ztest's wire.zig read-only for status-line
+    // framing. bench/scaling.sh sweeps thread counts and calls this per point.
+    const loadgen_mod = b.createModule(.{
+        .root_source_file = b.path("bench/loadgen.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    loadgen_mod.addImport("wire", b.createModule(.{
+        .root_source_file = b.path("ztest/src/wire.zig"),
+        .target = target,
+        .optimize = optimize,
+    }));
+    const loadgen_exe = b.addExecutable(.{
+        .name = "bench-loadgen",
+        .root_module = loadgen_mod,
+    });
+    b.installArtifact(loadgen_exe);
+
+    const run_loadgen = b.addRunArtifact(loadgen_exe);
+    if (b.args) |args| run_loadgen.addArgs(args);
+    const loadgen_step = b.step("loadgen", "Closed-loop HTTP load generator (args: <host:port> GET|PUT <path> [-c N] [-d SECS|-n REQS] [-b BODY])");
+    loadgen_step.dependOn(&run_loadgen.step);
 }

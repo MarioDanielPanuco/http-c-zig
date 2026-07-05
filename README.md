@@ -30,7 +30,8 @@ Or via the Zig build (also builds the mock server, the ztest runner, and the
 bench oracle):
 
 ```bash
-zig build            # -> zig-out/bin/{httpserver,mock-httpserver,ztest-runner,bench-differential}
+zig build            # -> zig-out/bin/{httpserver,mock-httpserver,ztest-runner,
+                     #                 bench-differential,bench-loadgen}
 ```
 
 A Nix flake pins the whole toolchain (clang, zig 0.15, python+toml, valgrind,
@@ -95,7 +96,7 @@ nginx/oha/wrk.
 **Semantic differential** — replays the `audit_*` workloads against both servers
 and checks they agree on observable HTTP semantics (status codes + GET body
 bytes), with an allowlist for legitimate nginx-vs-httpserver divergences (e.g.
-PUT-overwrite 200 vs 204, error-page bodies). The audit-log *linearizability*
+PUT-overwrite 200 vs 204, error-page bodies). The audit-log _linearizability_
 guarantee is unique to this server, so it stays checked by the harnesses above;
 this is the cross-implementation HTTP-semantics oracle.
 
@@ -118,10 +119,35 @@ nix develop -c bench/bench.sh
 nix develop -c env REQS=20000 CONC=100 DUR=15 bench/bench.sh
 ```
 
-Expect nginx to win GET throughput (sendfile zero-copy + event loop vs this
-server's thread-per-connection read/write loop) — a legitimate architectural
-gap. The point is a quantified, reproducible comparison plus proof the server's
-HTTP semantics match a reference implementation.
+Expect nginx to win GET throughput. The architectural gap possibly
+steming from nginx's use of sendfile zero-copy + an event loop
+vs this server's thread-per-connection read/write loop.
+
+**Thread-scaling head-to-head** — the multithreading comparison. Sweeps the
+worker count (httpserver `-t N`, nginx `worker_processes N`) under a *fixed*
+offered load and reports, per point: throughput `T(N)`, **scaling efficiency**
+`E(N) = T(N) / (N·T(1))` (1.0 = perfect linear scaling, <1 = contention), and
+the same-box **httpserver÷nginx ratio** — the one number that's portable across
+machines (raw req/s isn't). Load is driven by `bench-loadgen`, a Zig-native
+closed-loop generator that imports ztest's `wire.zig` and speaks the server's
+exact one-request-per-connection model natively — no `oha --disable-keepalive`
+approximation, no `wrk` reconnect artifacts.
+
+```bash
+nix develop -c bench/scaling.sh
+# tunables: THREADS_SWEEP ("1 2 4 8"), CONC (offered load), DUR, SIZES, METHOD
+nix develop -c env THREADS_SWEEP="1 2 4 8 16" CONC=128 DUR=10 bench/scaling.sh
+
+# the loadgen is also usable standalone:
+zig build loadgen -- 127.0.0.1:8080 GET /file.dat -c 64 -d 10
+#   -> "req_per_sec p50_ms p90_ms p99_ms requests errors mb_per_sec"
+```
+
+Reading it: nginx wins *absolute* throughput, but httpserver's thread pool often
+posts the higher *efficiency* — it keeps scaling as workers are added where
+nginx's per-worker event loop saturates the box sooner. Writes
+`bench/results/scaling_<date>.md` (+ `.csv`). Informational, not CI-gated:
+scaling only means something on a machine with real cores.
 
 ## Repo layout
 
@@ -130,5 +156,5 @@ HTTP semantics match a reference implementation.
 - `ztest/` — Zig black-box test layer (driver, audit checker, mock server)
 - `test_scripts/` — bash+python harness (oliver/sherlock/watson) + sanitizer stress
 - `workloads/` — TOML workload specifications
-- `bench/` — nginx differential oracle + benchmark harness
+- `bench/` — nginx differential oracle, oha/wrk benchmark, Zig loadgen + thread-scaling sweep
 - `docs/` — shared design docs (PLAN, STATE, ROADMAP, DECISIONS, REFERENCE)
