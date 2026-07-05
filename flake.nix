@@ -63,6 +63,11 @@
             nginx
             oha
             wrk
+            # bench/analysis: Julia turns bench/results CSVs into the SVG
+            # figures embedded by docs/performance.md. withPackages builds a
+            # hermetic depot (packages pre-instantiated at nix-build time, no
+            # ~/.julia network fetch at run time).
+            (julia.withPackages [ "CSV" "DataFrames" "Plots" ])
           ];
         };
       });
