@@ -1,0 +1,26 @@
+# Large stress-test binaries (regenerate: dd if=/dev/urandom of=test_files/large_binary.dat bs=1M count=1100)
+test_files/large_binary.dat
+old_proj_states/asgn4/test_files/large_binary.dat
+
+# Build outputs
+/httpserver
+*.o
+.zig-cache/
+zig-out/
+
+# Session scratch
+.superpowers/
+.claude/worktrees/
+error.txt
+output.txt
+*.tmp
+
+# AI tooling / planning docs (user commits these manually, see docs/DECISIONS.md)
+.claude/
+docs/
+
+# Student work snapshots (not source, read-only)
+practica/asgn4-starter/asgn4_helper_funcs.a
+practica/file_io/files/
+practica/CSE130_Asgn4_Winter23_v3.pdf
+
