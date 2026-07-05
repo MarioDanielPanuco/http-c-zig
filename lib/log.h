@@ -1,20 +1,22 @@
-
 #ifndef LOG_H
 #define LOG_H
 
 #include <stdio.h>
 
-// NOTE: this is a placeholder for M1 (compile-only). The real log module
-// (log_init(), thread-safe writes) is milestone M3 -- see docs/ROADMAP.md.
-// `logFile` has external linkage (defined once in src/log.c) rather than
-// `static` in the header: a `static FILE *logFile` here would give every
-// including .c file its own unused copy, which is a -Wunused-variable error
-// under -Werror since nothing calls LOG(...) yet.
-extern FILE *logFile;
+// M3: real audit-log module. Replaces the M1 placeholder (the broken
+// `lFile`/`logFile` extern + `LOG(...)` macro that had no synchronization).
+// The audit log is the linearization witness for the server, so every line
+// must be written atomically with respect to other threads.
 
-#define LOG(...) fprintf(logFile, __VA_ARGS__);
+// Point the audit log at a stream. Pass stderr for the default, or the FILE*
+// opened for a `-l PATH` argument. Must be called once before any log_audit.
+void log_init(FILE *stream);
 
+// Write one audit line "<oper>,<uri>,<status>,<rid>\n" atomically. Safe to
+// call from any worker thread concurrently; lines never interleave.
+void log_audit(const char *oper, const char *uri, int status, const char *rid);
 
+// Flush and, if the stream was opened from a path (not stderr), close it.
+void log_close(void);
 
-#endif //LOG_H
-
+#endif // LOG_H

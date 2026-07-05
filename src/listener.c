@@ -30,7 +30,7 @@ int listener_init(Listener_Socket *sock, int port) {
     addr.sin_port = htons(port);
 
     // Bind the socket to the address and port
-    if (bind(sock->fd, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
+    if (bind(sock->fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         // Error binding socket
         close(sock->fd);
         return -1;
@@ -55,7 +55,7 @@ int listener_accept(Listener_Socket *sock) {
     struct sockaddr_in client_addr;
     socklen_t client_len = sizeof(client_addr);
 
-    int connfd = accept(sock->fd, (struct sockaddr *) &client_addr, &client_len);
+    int connfd = accept(sock->fd, (struct sockaddr *)&client_addr, &client_len);
     if (connfd < 0) {
         return -1;
     }

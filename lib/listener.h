@@ -4,23 +4,23 @@
 #include <stdint.h>
 #include <sys/types.h>
 
+#include <err.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <errno.h>
-#include <err.h>
 
-#include <unistd.h>
 #include <fcntl.h>
+#include <unistd.h>
 
-#include <sys/types.h>
-#include <sys/socket.h>
 #include <sys/select.h>
+#include <sys/socket.h>
 #include <sys/time.h>
+#include <sys/types.h>
 
-#include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <netinet/in.h>
 
 /** @struct Listener_Socket
  *  @brief This structure represents a socket listening for connections
@@ -28,12 +28,11 @@
 typedef struct {
 
     /** @brief The socket for the listening connection. Note: do not use
-   *         this directly! Take a look at listener_init and
-   *         listener_accept instead!
-   */
+     *         this directly! Take a look at listener_init and
+     *         listener_accept instead!
+     */
     int fd;
 } Listener_Socket;
-
 
 /** @brief Initializes a listener socket that listens on the provided
  *         port on all of the interfaces for the host.
@@ -57,5 +56,4 @@ int listener_init(Listener_Socket *sock, int port);
  */
 int listener_accept(Listener_Socket *sock);
 
-#endif //LISTENER_H
-
+#endif // LISTENER_H

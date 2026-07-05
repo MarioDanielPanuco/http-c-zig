@@ -60,11 +60,11 @@ int fSize(int fd) {
     if (fstat(fd, &sBuf)) {
         return -1;
     }
-    return (int) sBuf.st_size;
+    return (int)sBuf.st_size;
 }
 
 void print_error(char *string, int errorCode) {
-    (void) string;
+    (void)string;
     exit(errorCode);
 }
 
@@ -101,9 +101,9 @@ ssize_t write_all(int connfd, char buffer[], size_t nbytes) {
                 continue;
             return -1;
         }
-        total += (size_t) n;
+        total += (size_t)n;
     }
-    return (ssize_t) total;
+    return (ssize_t)total;
 }
 
 // pass_bytes: stream nbytes from src to dst through a fixed-size buffer,
@@ -130,14 +130,14 @@ ssize_t pass_bytes(int src, int dst, size_t nbytes) {
         if (nread == 0)
             break; // source EOF before nbytes were transferred
 
-        ssize_t written = write_all(dst, buf, (size_t) nread);
+        ssize_t written = write_all(dst, buf, (size_t)nread);
         if (written < 0)
             return -1;
 
-        total += (size_t) nread;
+        total += (size_t)nread;
     }
 
-    return (ssize_t) total;
+    return (ssize_t)total;
 }
 
 // read_until: read from `in` until nbytes have been read, EOF, an error (or
@@ -159,15 +159,15 @@ ssize_t read_until(int in, char buf[], size_t nbytes, char *string) {
         if (n == 0)
             break; // EOF
 
-        total += (size_t) n;
+        total += (size_t)n;
 
         if (needle_len > 0 && total >= needle_len) {
             for (size_t i = 0; i + needle_len <= total; i++) {
                 if (memcmp(buf + i, string, needle_len) == 0)
-                    return (ssize_t) total;
+                    return (ssize_t)total;
             }
         }
     }
 
-    return (ssize_t) total;
+    return (ssize_t)total;
 }

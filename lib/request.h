@@ -11,5 +11,3 @@ extern const Request_t REQUEST_UNSUPPORTED;
 extern const Request_t *requests[NUM_REQUESTS];
 
 const char *request_get_str(const Request_t *);
-
-

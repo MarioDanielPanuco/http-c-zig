@@ -43,7 +43,7 @@ const SMOKE_TOML =
     \\[[events]]
     \\type = "CREATE"
     \\method = "PUT"
-    \\uri = "ztest-smoke.txt"
+    \\uri = "ztest_smoke.txt"
     \\infile = "ztest/src/main.zig"
     \\id = 0
     \\
@@ -58,7 +58,7 @@ const SMOKE_TOML =
     \\[[events]]
     \\type = "CREATE"
     \\method = "PUT"
-    \\uri = "ztest-smoke.txt"
+    \\uri = "ztest_smoke.txt"
     \\infile = "ztest/src/main.zig"
     \\id = 1
     \\
@@ -73,7 +73,7 @@ const SMOKE_TOML =
     \\[[events]]
     \\type = "CREATE"
     \\method = "GET"
-    \\uri = "ztest-smoke.txt"
+    \\uri = "ztest_smoke.txt"
     \\id = 2
     \\
     \\[[events]]
@@ -87,7 +87,7 @@ const SMOKE_TOML =
     \\[[events]]
     \\type = "CREATE"
     \\method = "GET"
-    \\uri = "ztest-smoke-missing.txt"
+    \\uri = "ztest_smoke_missing.txt"
     \\id = 3
     \\
     \\[[events]]
@@ -264,11 +264,28 @@ fn runOne(
     if (!parsed.result.ok) ok = false;
     printMessages(parsed.result.messages.items);
 
-    const order_result = try audit.checkOrdering(a, events, parsed.ops.items);
+    // waitForListen() probes readiness by opening a TCP connection and
+    // immediately closing it without sending a request. A spec-correct server
+    // (verified against the authoritative olivertwist/sherlock/watson harness)
+    // treats that as a malformed request and emits one `UNSUPPORTED,,400,0`
+    // audit line per spawn. That phantom is not a workload request -- worse,
+    // left in it corrupts replay filesystem state (its rid collides with the
+    // workload's rid 0). Drop non-GET/PUT ops before the sherlock/watson
+    // checks; no suite workload issues any other method, so this only ever
+    // removes probe noise. Well-formedness above still runs over every line.
+    var driven_ops: std.ArrayList(audit.Op) = .empty;
+    for (parsed.ops.items) |op| {
+        if (std.mem.eql(u8, op.oper, "GET") or std.mem.eql(u8, op.oper, "PUT")) {
+            try driven_ops.append(a, op);
+        }
+    }
+    const ops = driven_ops.items;
+
+    const order_result = try audit.checkOrdering(a, events, ops);
     if (!order_result.ok) ok = false;
     printMessages(order_result.messages.items);
 
-    const replay_result = try audit.checkReplay(a, events, parsed.ops.items, repo_root, driver.responses);
+    const replay_result = try audit.checkReplay(a, events, ops, repo_root, driver.responses);
     if (!replay_result.ok) ok = false;
     printMessages(replay_result.messages.items);
 

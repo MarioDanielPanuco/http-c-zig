@@ -10,9 +10,9 @@ struct Request {
     const char *str;
 };
 
-const Request_t REQUEST_GET         = { "GET" };
-const Request_t REQUEST_PUT         = { "PUT" };
-const Request_t REQUEST_UNSUPPORTED = { "UNSUPPORTED" };
+const Request_t REQUEST_GET = {"GET"};
+const Request_t REQUEST_PUT = {"PUT"};
+const Request_t REQUEST_UNSUPPORTED = {"UNSUPPORTED"};
 
 const Request_t *requests[NUM_REQUESTS] = {
     &REQUEST_GET,

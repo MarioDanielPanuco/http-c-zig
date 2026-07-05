@@ -62,6 +62,6 @@ bool queue_pop(queue_t *q, void **elem);
 /** @brief Takes in a queue pointer and prints the contents of the queue in order (head to tail)
  *
  * @param q: queue to be printed
- * @return void 
+ * @return void
  */
-void printQueue(queue_t *q); 
+void printQueue(queue_t *q);

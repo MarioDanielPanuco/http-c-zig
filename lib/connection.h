@@ -1,7 +1,7 @@
 #pragma once
 
-#include "response.h"
 #include "request.h"
+#include "response.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -49,6 +49,5 @@ const Response_t *conn_send_file(conn_t *conn, int fd, uint64_t count);
 // send canonical message for a response type
 const Response_t *conn_send_response(conn_t *conn, const Response_t *res);
 
-//Functions for debugging:
+// Functions for debugging:
 char *conn_str(conn_t *conn);
-

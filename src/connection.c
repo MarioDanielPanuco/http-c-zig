@@ -54,7 +54,7 @@ struct Conn {
     char buffer[BUFFER_SIZE + 1]; // +1: spare byte for the regexec null terminator
     ssize_t bytes_read;
     int message_start; // offset into buffer where the body/leftover begins
-    int in_message; // buffered leftover body bytes: bytes_read - message_start
+    int in_message;    // buffered leftover body bytes: bytes_read - message_start
     ssize_t content_length;
     char content_length_str[32];
     char uri[64];
@@ -95,19 +95,19 @@ static const Response_t *parse_headers(conn_t *conn) {
 
         char key[129];
         char value[129];
-        memcpy(key, headers + offset + match[1].rm_so, (size_t) key_len);
+        memcpy(key, headers + offset + match[1].rm_so, (size_t)key_len);
         key[key_len] = '\0';
-        memcpy(value, headers + offset + match[2].rm_so, (size_t) value_len);
+        memcpy(value, headers + offset + match[2].rm_so, (size_t)value_len);
         value[value_len] = '\0';
 
-        if (strncmp(headers + offset + match[1].rm_so, "Content-Length", (size_t) key_len) == 0) {
-            conn->content_length = (ssize_t) strtoull(value, NULL, 10);
-        } else if (strncmp(headers + offset + match[1].rm_so, "Request-Id", (size_t) key_len) == 0) {
+        if (strncmp(headers + offset + match[1].rm_so, "Content-Length", (size_t)key_len) == 0) {
+            conn->content_length = (ssize_t)strtoull(value, NULL, 10);
+        } else if (strncmp(headers + offset + match[1].rm_so, "Request-Id", (size_t)key_len) == 0) {
             strncpy(conn->request_id, value, sizeof(conn->request_id) - 1);
             conn->request_id[sizeof(conn->request_id) - 1] = '\0';
         }
 
-        offset += (int) match[0].rm_eo;
+        offset += (int)match[0].rm_eo;
     }
 
     conn->message_start += offset + 2; // skip the blank line ("\r\n") ending headers
@@ -150,14 +150,14 @@ static const Response_t *process_request(conn_t *conn) {
         return &RESPONSE_VERSION_NOT_SUPPORTED;
     }
 
-    conn->message_start = (int) match[4].rm_eo + 2; // skip \r\n after HTTP/x.y
+    conn->message_start = (int)match[4].rm_eo + 2; // skip \r\n after HTTP/x.y
 
     int uri_len = match[2].rm_eo - match[2].rm_so;
-    if (uri_len >= (int) sizeof(conn->uri)) {
+    if (uri_len >= (int)sizeof(conn->uri)) {
         regfree(&re);
         return &RESPONSE_BAD_REQUEST;
     }
-    memcpy(conn->uri, conn->buffer + match[2].rm_so, (size_t) uri_len);
+    memcpy(conn->uri, conn->buffer + match[2].rm_so, (size_t)uri_len);
     conn->uri[uri_len] = '\0';
 
     regfree(&re);
@@ -171,7 +171,7 @@ static const Response_t *process_request(conn_t *conn) {
 }
 
 conn_t *conn_new(int connfd) {
-    conn_t *conn = (conn_t *) calloc(1, sizeof(conn_t));
+    conn_t *conn = (conn_t *)calloc(1, sizeof(conn_t));
     if (conn == NULL) {
         return NULL;
     }
@@ -215,7 +215,7 @@ const Response_t *conn_parse(conn_t *conn) {
     // Gem (docs/REFERENCE.md #2): whatever of the PUT body was already
     // buffered by the read_until() call above belongs to the body, not the
     // headers -- conn_recv_file writes it out before streaming the rest.
-    conn->in_message = (int) conn->bytes_read - conn->message_start;
+    conn->in_message = (int)conn->bytes_read - conn->message_start;
 
     return NULL;
 }
@@ -231,7 +231,7 @@ char *conn_get_uri(conn_t *conn) {
 char *conn_get_header(conn_t *conn, char *header) {
     if (strcmp(header, "Content-Length") == 0) {
         snprintf(conn->content_length_str, sizeof(conn->content_length_str), "%jd",
-            (intmax_t) conn->content_length);
+                 (intmax_t)conn->content_length);
         return conn->content_length_str;
     }
     if (strcmp(header, "Request-Id") == 0) {
@@ -244,7 +244,7 @@ const Response_t *conn_recv_file(conn_t *conn, int fd) {
     ssize_t total_written = 0;
 
     if (conn->in_message > 0) {
-        total_written = write_all(fd, &conn->buffer[conn->message_start], (size_t) conn->in_message);
+        total_written = write_all(fd, &conn->buffer[conn->message_start], (size_t)conn->in_message);
         if (total_written < 0) {
             return &RESPONSE_INTERNAL_SERVER_ERROR;
         }
@@ -252,7 +252,7 @@ const Response_t *conn_recv_file(conn_t *conn, int fd) {
 
     ssize_t remaining = conn->content_length - total_written;
     if (remaining > 0) {
-        ssize_t rc = pass_bytes(conn->connfd, fd, (size_t) remaining);
+        ssize_t rc = pass_bytes(conn->connfd, fd, (size_t)remaining);
         if (rc < 0) {
             return &RESPONSE_INTERNAL_SERVER_ERROR;
         }
@@ -263,16 +263,16 @@ const Response_t *conn_recv_file(conn_t *conn, int fd) {
 
 const Response_t *conn_send_file(conn_t *conn, int fd, uint64_t count) {
     char header[BUFFER_SIZE];
-    int header_len = snprintf(header, sizeof(header), "HTTP/1.1 %d %s\r\nContent-Length: %" PRIu64
-                                                        "\r\n\r\n",
-        response_get_code(&RESPONSE_OK), response_get_message(&RESPONSE_OK), count);
+    int header_len =
+        snprintf(header, sizeof(header), "HTTP/1.1 %d %s\r\nContent-Length: %" PRIu64 "\r\n\r\n",
+                 response_get_code(&RESPONSE_OK), response_get_message(&RESPONSE_OK), count);
 
-    if (write_all(conn->connfd, header, (size_t) header_len) < 0) {
+    if (write_all(conn->connfd, header, (size_t)header_len) < 0) {
         return &RESPONSE_INTERNAL_SERVER_ERROR;
     }
 
     if (count > 0) {
-        ssize_t rc = pass_bytes(fd, conn->connfd, (size_t) count);
+        ssize_t rc = pass_bytes(fd, conn->connfd, (size_t)count);
         if (rc < 0) {
             return &RESPONSE_INTERNAL_SERVER_ERROR;
         }
@@ -289,10 +289,11 @@ const Response_t *conn_send_response(conn_t *conn, const Response_t *res) {
     int body_len = snprintf(body, sizeof(body), "%s\n", msg);
 
     char header[BUFFER_SIZE];
-    int header_len = snprintf(header, sizeof(header),
-        "HTTP/1.1 %d %s\r\nContent-Length: %d\r\n\r\n%s", code, msg, body_len, body);
+    int header_len =
+        snprintf(header, sizeof(header), "HTTP/1.1 %d %s\r\nContent-Length: %d\r\n\r\n%s", code,
+                 msg, body_len, body);
 
-    if (write_all(conn->connfd, header, (size_t) header_len) < 0) {
+    if (write_all(conn->connfd, header, (size_t)header_len) < 0) {
         return &RESPONSE_INTERNAL_SERVER_ERROR;
     }
 

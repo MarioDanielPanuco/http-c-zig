@@ -4,22 +4,24 @@
 #include <getopt.h>
 #include <stdlib.h>
 #include <sys/types.h>
-#include "util.h"
 
 #define OPTIONS "t:l:"
-#define DEFAULT_THREAD_COUNT 2 
+#define DEFAULT_THREAD_COUNT 4
 
+// Parsed command-line options for `./httpserver [-t threads] [-l logfile] <port>`.
 struct OPT {
-  int n_threads; 
-  char *log_path;
+    int n_threads;  // -t N, default DEFAULT_THREAD_COUNT
+    char *log_path; // -l PATH, or NULL for stderr (owned by argv, do not free)
+    int port;       // required positional argument
 };
 
-/* @brief Parses the command line arguments
- * @param argc: Number of arguments provided to the program
- * @param argv: The program arguments
- * @returns -1 if error, 0 if 
- *
+/* @brief Parse argc/argv into *opts.
+ * @param argc  argument count
+ * @param argv  argument vector
+ * @param opts  out-param populated with threads/log_path/port
+ * @returns 0 on success; -1 on any usage error (a usage message is printed to
+ *          stderr). The caller should exit non-zero on -1.
  */
-ssize_t opt_parse (int argc, char* argv[]); 
+int opt_parse(int argc, char *argv[], struct OPT *opts);
 
 #endif // !OPT_H
