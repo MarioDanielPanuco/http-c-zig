@@ -27,11 +27,14 @@ ssize_t opt_parse (int argc, char* argv[]) {
     } else {
         char *endptr = NULL;
         port = (size_t) strtoull(argv[optind], &endptr, 10);
+        (void) port; // not yet wired into `opts` -- see M3 (docs/ROADMAP.md)
 
         if (endptr && *endptr != '\0') {
             warnx("invalid port number: %s", argv[1]);
             return EXIT_FAILURE;
         }
     }
+
+    return 0;
 }
 

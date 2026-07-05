@@ -13,29 +13,5 @@ extern const Response_t RESPONSE_INTERNAL_SERVER_ERROR;
 extern const Response_t RESPONSE_NOT_IMPLEMENTED;
 extern const Response_t RESPONSE_VERSION_NOT_SUPPORTED;
 
-typedef enum { 
-  OK, 
-  CREATED,
-  BAD_REQUEST,
-  FORBIDDEN,
-  NOT_FOUND,
-  INTERNAL_SERVER_ERROR,
-  NOT_IMPLEMENTED,
-  VERSION_NOT_SUPPORTED
-} Response_tt;
-
-struct Response {
-  Response_tt response_type; 
-};
-
-
-#define RESPONSE_OK         401
-#define RESPONSE_NOT_FOUND  404 
-// #define RESPONSE_CREATED    
-
-
 uint16_t response_get_code(const Response_t *);
-uint16_t response_get_code(const Response_t *) {
-
-}
 const char *response_get_message(const Response_t *);

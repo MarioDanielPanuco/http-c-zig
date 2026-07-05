@@ -1,6 +1,7 @@
 
 // Standard Headers
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 
@@ -112,7 +113,7 @@ void printQueue(queue_t *q) {
     int index = q->head;
     fprintf(stdout, "%s", "Queue: ");
     for (int i = 0; i < q->count; i++) {
-        fprintf(stdout, "%d ", q->array[index]);
+        fprintf(stdout, "%p ", q->buffer[index]);
         index++;
     }
     fprintf(stdout, "%s\n", "");

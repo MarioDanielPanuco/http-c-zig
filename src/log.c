@@ -1,6 +1,4 @@
 #include "../lib/log.h"
-#include <stdio.h>
 
-
-static FILE *logFile;
-# define LOG(...) fprintf(logFile, __VA_ARGS__);
+// Placeholder definition for M1 (compile-only); real init/wiring is M3.
+FILE *logFile = NULL;

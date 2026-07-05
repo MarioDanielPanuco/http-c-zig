@@ -1,5 +1,5 @@
 
-#include "../lib/asgn2_helper_funcs.h"
+#include "../lib/listener.h"
 #include "../lib/connection.h"
 #include "../lib/response.h"
 #include "../lib/request.h"
@@ -34,9 +34,11 @@ pthread_mutex_t glob;
 pthread_mutex_t f_lock;
 queue_t *q;
 
-void *runner(void *arg);
+// static: src/threadpool.c (unused/M3, see docs/ROADMAP.md) defines its own
+// non-static `runner`; without `static` here the two collide at link time.
+static void *runner(void *arg);
 
-void *runner(void *arg) {
+static void *runner(void *arg) {
     (void) arg;
 
     while (1) {
@@ -90,7 +92,7 @@ int main(int argc, char **argv) {
     }
 
     Listener_Socket sock;
-    listener_new(&sock, port);
+    listener_init(&sock, port);
 
     while (1) {
         intptr_t connfd = listener_accept(&sock);
@@ -108,6 +110,12 @@ void handle_connection(uintptr_t connfd) {
     const Response_t *res = conn_parse(conn);
 
     if (res != NULL) {
+        // 501 (unsupported method) takes precedence over 505 (bad version):
+        // if both conditions are true, return 501
+        if (res == &RESPONSE_VERSION_NOT_SUPPORTED
+            && conn_get_request(conn) == &REQUEST_UNSUPPORTED) {
+            res = &RESPONSE_NOT_IMPLEMENTED;
+        }
         conn_send_response(conn, res);
         audit_send_response(conn, res);
     } else {
@@ -129,10 +137,11 @@ void handle_get(conn_t *conn) {
     const Response_t *res = NULL;
     char *uri = conn_get_uri(conn);
 
-    int f_size = -1;
-
+    // GET must never modify the file it serves: open read-only, no
+    // ftruncate. (M2 fix: this previously did ftruncate(fd, 0) here,
+    // destroying the file's contents right before serving them.)
     pthread_mutex_lock(&glob);
-    int fd = open(uri, O_RDONLY, 0666);
+    int fd = open(uri, O_RDONLY);
     if (fd < 0) {
         if (errno == EACCES || errno == EISDIR) {
             res = &RESPONSE_FORBIDDEN;
@@ -148,36 +157,29 @@ void handle_get(conn_t *conn) {
     }
 
     flock(fd, LOCK_SH);
-    ftruncate(fd, 0);
     pthread_mutex_unlock(&glob);
 
-    struct stat buf;
-    fstat(fd, &buf);
-    f_size = buf.st_size;
+    struct stat st;
+    fstat(fd, &st);
 
-    if (S_ISDIR(buf.st_mode)) {
+    if (S_ISDIR(st.st_mode)) {
         res = &RESPONSE_FORBIDDEN;
         conn_send_response(conn, res);
         audit_send_response(conn, res);
+        flock(fd, LOCK_UN);
         close(fd);
         return;
     }
 
-    if (res == NULL) {
-        res = &RESPONSE_OK;
-        goto out;
-    }
-
-out:
-    if (f_size >= 0)
-        conn_send_file(conn, fd, f_size);
-    if (res == NULL) {
-        res = &RESPONSE_OK;
-    }
+    // The intended status is 200 once we know the file is a readable
+    // regular file; conn_send_file's own success/failure (e.g. the client
+    // hanging up mid-transfer) does not change the *intended* code that
+    // goes in the audit log -- see httpserver-spec skill's audit-log note.
+    res = &RESPONSE_OK;
+    conn_send_file(conn, fd, (uint64_t) st.st_size);
     audit_send_response(conn, res);
     flock(fd, LOCK_UN);
     close(fd);
-    return;
 }
 
 void handle_unsupported(conn_t *conn) {
@@ -232,10 +234,12 @@ void handle_put(conn_t *conn) {
 int audit_send_response(conn_t *conn, const Response_t *res) {
     uint16_t status_code = response_get_code(res);
     char *uri = conn_get_uri(conn);
-    const char *msg = response_get_message(res);
+    // Oper is the HTTP verb (GET/PUT), not the response message -- the
+    // response message (e.g. "OK") was the M2 audit-log format bug.
+    const char *verb = request_get_str(conn_get_request(conn));
     char *requestID = conn_get_header(conn, "Request-Id");
 
-    fprintf(stderr, "%s,%s,%d,%s\n", msg, uri, status_code, requestID);
+    fprintf(stderr, "%s,%s,%d,%s\n", verb, uri, status_code, requestID);
     if (fflush(stderr) != 0)
         return -1;
     return 1;

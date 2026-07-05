@@ -45,7 +45,7 @@ typedef struct {
  *  @return 0, indicating success, or -1, indicating that it failed to
  *          listen.
  */
-int listener_new(Listener_Socket *sock, int port);
+int listener_init(Listener_Socket *sock, int port);
 
 /** @brief Accept a new connection and initialize a 5 second timeout
  *

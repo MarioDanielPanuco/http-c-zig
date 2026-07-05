@@ -1,10 +1,9 @@
 #ifndef OPT_H
 #define OPT_H
 
-#include <stdlib>
 #include <getopt.h>
 #include <stdlib.h>
-#include <sys/_types/_ssize_t.h>
+#include <sys/types.h>
 #include "util.h"
 
 #define OPTIONS "t:l:"

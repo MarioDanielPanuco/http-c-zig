@@ -4,46 +4,20 @@
  * Interfaces provided as starter code for Assignment 2.
  *
  * @author Andrew Quinn
+ *
+ * M1 note: this header used to duplicate `Listener_Socket` and
+ * `listener_init`/`listener_accept` alongside `lib/listener.h` (the two
+ * headers disagreed on the function name -- `listener_new` vs
+ * `listener_init`). Canonical home for the listener API is now
+ * `lib/listener.h`; this header keeps only the raw IO helpers, so it no
+ * longer needs to be included just to get `Listener_Socket`. See
+ * docs/REFERENCE.md and docs/DECISIONS.md for the rationale.
  */
 
 #pragma once
 
 #include <stdint.h>
 #include <sys/types.h>
-
-/** @struct Listener_Socket
- *  @brief This structure represents a socket listening for connections
- */
-typedef struct {
-
-    /** @brief The socket for the listening connection. Note: do not use
-   *         this directly! Take a look at listener_init and
-   *         listener_accept instead!
-   */
-    int fd;
-} Listener_Socket;
-
-/** @brief Initializes a listener socket that listens on the provided
- *         port on all of the interfaces for the host.
- *
- *  @param sock The Listener_Socket to initialize.
- *
- *  @param port The port on which to listen.
- *
- *  @return 0, indicating success, or -1, indicating that it failed to
- *          listen.
- */
-int listener_new(Listener_Socket *sock, int port);
-
-/** @brief Accept a new connection and initialize a 5 second timeout
- *
- *  @param sock The Listener_Socket from which to get the new
- *              connection.
- *
- *  @return An socket for the new connection, or -1, if there is an
- *          error. Sets errno according to any errors that occur.
- */
-int listener_accept(Listener_Socket *sock);
 
 /** @brief Reads bytes from in into buf until either (1) it has read
  *         nbytes, (2) in is out of bytes to return, (3) in times out,
@@ -95,4 +69,3 @@ ssize_t write_all(int out, char buf[], size_t nbytes);
  *          Sets errno according to any errors that occur.
  */
 ssize_t pass_bytes(int src, int dst, size_t nbytes);
-

@@ -1,33 +1,7 @@
 #include "../lib/util.h"
-// #include "../lib/asgn2_helper_funcs.h"
-#include "../lib/request.h"
 
-// #include <cstdint>
-#include <sys/_types/_ssize_t.h>
-#include <err.h>
-#include <stdio.h>
-
-// Creates a socket for listening for connections.
-// Closes the program and prints an error message on error.
-static int create_listen_socket(uint16_t port) {
-    struct sockaddr_in addr;
-    int listenfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (listenfd < 0) {
-        err(EXIT_FAILURE, "socket error");
-    }
-    memset(&addr, 0, sizeof addr);
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htons(INADDR_ANY);
-    addr.sin_port = htons(port);
-    if (bind(listenfd, (struct sockaddr *) &addr, sizeof addr) < 0) {
-        err(EXIT_FAILURE, "bind error");
-    }
-    if (listen(listenfd, 128) < 0) {
-        err(EXIT_FAILURE, "listen error");
-    }
-    return listenfd;
-}
-
+#include <errno.h>
+#include <string.h>
 
 char *removeSlash(char *str) {
     if (str[0] == '/') {
@@ -40,8 +14,14 @@ int minimum(int a, int b) {
     return a < b ? a : b;
 }
 
+// Security note (see docs/REFERENCE.md gem #3): write the *exact* message to
+// stderr and exit -- no fprintf/format string built from untrusted input.
+// The original asgn2 version used `sizeof(msg) / sizeof(msg[0])`, which on a
+// `char *` parameter computes sizeof(char*)/sizeof(char) (8 on most 64-bit
+// platforms) instead of the string length -- a known asgn2 defect
+// (docs/REFERENCE.md "sizeof applied to pointer"). Fixed here to strlen(msg).
 int error_msg(char *msg) {
-    write_all(STDERR_FILENO, msg, (ssize_t) sizeof(msg) / sizeof(msg[0]));
+    write_all(STDERR_FILENO, msg, strlen(msg));
     exit(EXIT_FAILURE);
     return 0;
 }
@@ -69,7 +49,7 @@ int isFile(char *filename) {
     return NEW_FILE;
 }
 
-int fileChecking() {
+int fileChecking(void) {
     if (errno == ENOENT)
         return 404;
     return SUCCESS;
@@ -84,12 +64,11 @@ int fSize(int fd) {
 }
 
 void print_error(char *string, int errorCode) {
-    //    fprintf(stderr, "%s\n", string);
     (void) string;
     exit(errorCode);
 }
 
-int errno_check() {
+int errno_check(void) {
     if (errno == EAGAIN || errno == EWOULDBLOCK) {
         return INTERNAL_SERVER_ERROR;
     }
@@ -102,51 +81,93 @@ ssize_t read_all(int connfd, char *buffer) {
 
     ssize_t n = BUFFER_SIZE + 5;
     while ((readCode = read(connfd, buffer + totalRead, n - totalRead)) > 0) {
-        //        printf("read buf: %s|", buffer);
         totalRead += readCode;
         if (totalRead == n) {
             return totalRead;
         }
-        //        printf("read char: %c|", buffer[totalRead - 1]);
-        //        if (buffer[totalRead - 1] == '\n') {
-        //            printf("totalRead: %zd", totalRead);
-        //            return totalRead;
-        //        }
-        //        readCode = read(connfd, buffer + totalRead, BUFFER_SIZE);
     }
-    //    memset(&buffer[n], '\0', 1);
-
-    //    fprintf(stderr, "%s\n", buffer);
-    //    do {
-    //        readCode = read(connfd, buffer + totalRead, BUFFER_SIZE);
-    //        totalRead += readCode;
-    //        printf("read_code: %zd\n", totalRead);
-    //
-    //        if (readCode < 0)
-    //            return -1;
-    //
-    //    } while (readCode > 0);
     return totalRead;
 }
-      
-ssize_t write_all(int connfd, char buffer[], ssize_t numBytes) {
-    ssize_t bytesWritten = 0, bytez = 0;
-    while (bytesWritten < numBytes) {
-        bytez = write(connfd, buffer + bytesWritten, numBytes - bytesWritten);
-        if (bytez < 0)
+
+// write_all: loop until every byte is written or a real error occurs.
+// Retries on EINTR (a signal interrupting the write is not a failure).
+ssize_t write_all(int connfd, char buffer[], size_t nbytes) {
+    size_t total = 0;
+
+    while (total < nbytes) {
+        ssize_t n = write(connfd, buffer + total, nbytes - total);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
             return -1;
-        bytesWritten += bytez;
+        }
+        total += (size_t) n;
     }
-    return bytesWritten;
-} 
-
-ssize_t pass_bytes(int src, int dst, size_t nbytes) {
-
-  ssize_t bytesWritten = 0; 
-  while (bytesWritten < nbytes) {
-
-
-  }
-  
+    return (ssize_t) total;
 }
 
+// pass_bytes: stream nbytes from src to dst through a fixed-size buffer,
+// without reading the whole transfer into memory at once. Per
+// c-systems-idioms: both read() and write() may transfer fewer bytes than
+// requested, so both sides loop; EINTR is retried, not treated as failure.
+// (Was previously an empty infinite-loop stub at src/util.c:143-151.)
+ssize_t pass_bytes(int src, int dst, size_t nbytes) {
+    char buf[BUFFER_SIZE];
+    size_t total = 0;
+
+    while (total < nbytes) {
+        size_t want = nbytes - total;
+        if (want > sizeof(buf))
+            want = sizeof(buf);
+
+        ssize_t nread;
+        do {
+            nread = read(src, buf, want);
+        } while (nread < 0 && errno == EINTR);
+
+        if (nread < 0)
+            return -1;
+        if (nread == 0)
+            break; // source EOF before nbytes were transferred
+
+        ssize_t written = write_all(dst, buf, (size_t) nread);
+        if (written < 0)
+            return -1;
+
+        total += (size_t) nread;
+    }
+
+    return (ssize_t) total;
+}
+
+// read_until: read from `in` until nbytes have been read, EOF, an error (or
+// timeout -- SO_RCVTIMEO surfaces as EAGAIN/EWOULDBLOCK from read(), which we
+// deliberately do NOT swallow: the caller maps a timeout to a 500 response),
+// or `string` appears in the buffer so far.
+ssize_t read_until(int in, char buf[], size_t nbytes, char *string) {
+    size_t needle_len = string ? strlen(string) : 0;
+    size_t total = 0;
+
+    while (total < nbytes) {
+        ssize_t n;
+        do {
+            n = read(in, buf + total, nbytes - total);
+        } while (n < 0 && errno == EINTR);
+
+        if (n < 0)
+            return -1;
+        if (n == 0)
+            break; // EOF
+
+        total += (size_t) n;
+
+        if (needle_len > 0 && total >= needle_len) {
+            for (size_t i = 0; i + needle_len <= total; i++) {
+                if (memcmp(buf + i, string, needle_len) == 0)
+                    return (ssize_t) total;
+            }
+        }
+    }
+
+    return (ssize_t) total;
+}
