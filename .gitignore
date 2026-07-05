@@ -8,6 +8,13 @@ old_proj_states/asgn4/test_files/large_binary.dat
 .zig-cache/
 zig-out/
 
+# Test-harness run outputs (olivertwist/sherlock/watson litter)
+/replay/
+/outs/
+/auditlog
+/oliver.out
+/stdout.txt
+
 # Session scratch
 .superpowers/
 .claude/worktrees/

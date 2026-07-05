@@ -3,10 +3,9 @@ const std = @import("std");
 // M6 (Zig track): builds the C httpserver with zig cc, and hosts the ztest
 // runner (Zig-based replacement for the bash+python test harness).
 //
-// The C sources under src/ are mid-port (see docs/PLAN.md) and are expected
-// to fail to compile until the C track lands M1. That is fine: `zig build`
-// should fail with C compiler diagnostics, not with build.zig plumbing
-// errors. Once src/ builds, `zig build` produces ./zig-out/bin/httpserver.
+// The C track has landed: `zig build` compiles src/*.c and produces
+// ./zig-out/bin/httpserver. C flags are kept in lockstep with the Makefile
+// (rubric warnings + -std=gnu17).
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -43,7 +42,9 @@ pub fn build(b: *std.Build) void {
         "-Wextra",
         "-Werror",
         "-pedantic",
-        "-std=gnu11",
+        // Kept in lockstep with the Makefile's CFLAGS so `zig build` and `make`
+        // compile the C sources against the same language standard.
+        "-std=gnu17",
     }) catch @panic("OOM");
     if (!std.mem.eql(u8, san, "none")) {
         c_flags.append(b.allocator, b.fmt("-fsanitize={s}", .{san})) catch @panic("OOM");

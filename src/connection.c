@@ -308,6 +308,14 @@ const Response_t *conn_recv_file(conn_t *conn, int fd) {
     ssize_t total_written = 0;
 
     if (conn->in_message > 0) {
+        // Verbatim asgn2 behavior (docs/DECISIONS.md D3, D18): the *entire*
+        // buffered leftover is written out, even if `in_message` exceeds
+        // Content-Length (an over-long first segment writes past the declared
+        // length; `remaining` below then just goes negative and no further
+        // bytes are streamed). The ztest mock clamps this write to
+        // Content-Length, so the two implementations diverge on an over-long
+        // first segment; the divergence is intentional and D3-protected -- do
+        // NOT "fix" the C side to clamp.
         total_written = write_all(fd, &conn->buffer[conn->message_start], (size_t)conn->in_message);
         if (total_written < 0) {
             return &RESPONSE_INTERNAL_SERVER_ERROR;

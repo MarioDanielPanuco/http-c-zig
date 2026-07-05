@@ -6,7 +6,11 @@
 #include <sys/types.h>
 
 #define OPTIONS "t:l:"
-#define DEFAULT_THREAD_COUNT 4
+// Default worker-thread count. The process runs this many workers plus one
+// dispatcher (the main thread), so the default is 3 workers => 4 OS threads
+// total, which is the count test_scripts/threads_custom.sh gates on for the
+// default (no -t) case. See docs/DECISIONS.md D17.
+#define DEFAULT_THREAD_COUNT 3
 
 // Parsed command-line options for `./httpserver [-t threads] [-l logfile] <port>`.
 struct OPT {

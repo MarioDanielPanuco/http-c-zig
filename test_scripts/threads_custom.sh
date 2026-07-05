@@ -28,10 +28,14 @@ if [[ $wait_rc -eq 1 ]]; then
     exit 1
 fi
 
+# Count OS threads robustly via /proc/<pid>/task (one entry per thread,
+# including the main dispatcher). The old `ps -o thcount | cut -d' ' -f5`
+# yielded an empty string for 2-digit counts (mis-tokenized columns) and
+# never gated. Convention: N workers (-t value) + 1 dispatcher(main) = N+1.
 rc=0
-count=`ps -o thcount $pid | head -2 | tail -1 | cut -d ' ' -f 5`
-if [ $count -ne 3 ]; then
-    msg="Server created $count threads instead of 2 threads\n"
+count=`ls /proc/$pid/task | wc -l`
+if [ "$count" -ne 3 ]; then
+    msg="Server created $count threads instead of 3 (-t 2 => 2 workers + 1 dispatcher)\n"
     rc=1
 fi
 
@@ -63,10 +67,10 @@ if [[ $wait_rc -eq 1 ]]; then
     exit 1
 fi
 
-rc=0
-count=`ps -o thcount $pid | head -2 | tail -1 | cut -d ' ' -f 5`
-if [ $count -ne 4 ]; then
-    msg="${msg}Server created $count threads instead of 4 threads\n"
+# NB: do NOT reset rc here -- resetting made only the last check gate.
+count=`ls /proc/$pid/task | wc -l`
+if [ "$count" -ne 4 ]; then
+    msg="${msg}Server created $count threads instead of 4 (default => 3 workers + 1 dispatcher)\n"
     rc=1
 fi
 
@@ -98,10 +102,10 @@ if [[ $wait_rc -eq 1 ]]; then
     exit 1
 fi
 
-rc=0
-count=`ps -o thcount $pid | head -2 | tail -1 | cut -d ' ' -f 5`
-if [ $count -ne 9 ]; then
-    msg="${msg}Server created $count threads instead of 8 threads\n"
+# NB: do NOT reset rc here either (see above).
+count=`ls /proc/$pid/task | wc -l`
+if [ "$count" -ne 9 ]; then
+    msg="${msg}Server created $count threads instead of 9 (-t 8 => 8 workers + 1 dispatcher)\n"
     rc=1
 fi
 

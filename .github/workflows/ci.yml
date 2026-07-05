@@ -53,5 +53,8 @@ jobs:
       - name: Build C server with Zig
         run: zig build
 
-      - name: Run Zig HTTP workload runner
+      - name: Run Zig HTTP workload runner against the mock server
         run: zig build test-http
+
+      - name: Run Zig HTTP workload runner against the real C server
+        run: zig build test-http -- zig-out/bin/httpserver

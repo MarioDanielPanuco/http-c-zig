@@ -10,7 +10,6 @@
 #include <err.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -133,44 +132,39 @@ static void uri_unlock(int lockfd) {
 }
 
 //////////////////////////////////////////////////////////////////////
-// SIGTERM/SIGINT handling for audit-log durability (M4 plan item 2; the
-// commented-out placeholder handlers at the old httpserver.c L84-85).
+// SIGTERM/SIGINT handling for audit-log durability (M4 plan item 2; amended by
+// the final-review fix wave -- see docs/DECISIONS.md D17, which amends D13).
 //
 // The spec requires log entries to be durable across a SIGTERM: "your server
 // must ensure that log entries are resident in the log after we send your
 // server a SIGTERM signal." log_audit already fflushes every line as it's
-// written (docs/DECISIONS.md D10), so durability is already satisfied by the
-// time any signal arrives; what a handler adds is a *clean exit* instead of
-// the default disposition (immediate termination without a chance to close a
-// `-l` logfile's stream, or -- if the plan called for it -- to drain more
-// state).
+// written (docs/DECISIONS.md D10), so a completed line is already in the
+// kernel's page cache before any signal can arrive -- durability is satisfied
+// continuously, not at shutdown. What a handler adds is a *clean exit* (status
+// 0) in place of the default disposition.
 //
-// Design (per posix-threading skill): a signal handler body is restricted to
-// async-signal-safe calls, and log_close()/fclose() are not on that list, so
-// this does *not* run cleanup from a signal handler. Instead, SIGTERM and
-// SIGINT are blocked (via pthread_sigmask) before any worker thread is
-// created, so every thread in the process -- dispatcher and workers alike --
-// inherits the block. A dedicated thread then sits in sigwait() on exactly
-// those two signals; sigwait() is not a signal handler, so it runs with the
-// full C library available. When it wakes, it flushes/closes the audit log
-// and calls exit(), which tears down the whole process (closing every fd,
-// releasing every flock/lockfile the workers may be holding) -- there is
-// nothing to "stop accepting" separately, because the dispatcher's accept()
-// loop and every in-flight worker die with the process.
+// Design: a plain sigaction() handler whose entire body is `_exit(EXIT_SUCCESS)`.
+// `_exit()` is on POSIX's async-signal-safe list, so it is legal to call from a
+// signal handler (unlike exit()/fclose()/log_close(), which are not). Because
+// every audit line was already fflush'd, there is nothing left to flush at
+// exit -- _exit() closing the fds is enough; it deliberately does NOT run
+// stdio flushing or atexit handlers, which is exactly why it is safe here.
 //
-// Repeated SIGINT/SIGTERM cannot deadlock: the signal stays blocked in every
-// thread for the process's entire remaining lifetime (nothing ever unblocks
-// it), so a second delivery is simply queued/coalesced by the kernel and
-// never reaches a second sigwait() call or handler body -- there is no lock
-// this path acquires that a repeat delivery could contend.
-static sigset_t shutdown_set;
-
-static void *signal_wait_thread(void *arg) {
-    (void)arg;
-    int sig = 0;
-    sigwait(&shutdown_set, &sig);
-    log_close(); // flush + close a `-l` logfile (fflush already keeps stderr durable per-line)
-    exit(EXIT_SUCCESS);
+// This adds NO extra OS thread. The earlier D13 design blocked the signal in
+// every thread and ran a dedicated sigwait() thread + log_close() + exit(); the
+// dedicated thread inflated the process's thread count to N workers + main +
+// signal-thread = N+2, breaking the N+1 thread-count contract that
+// test_scripts/threads_custom.sh gates on (worker count from -t, plus the one
+// dispatcher/main thread). The sigaction handler needs no companion thread, so
+// the process is exactly N+1 threads.
+//
+// Repeated SIGINT/SIGTERM cannot deadlock or double-run cleanup: the first
+// delivery's handler _exit()s the process before it can return, so a second
+// delivery never observes a live process. The handler touches no lock, so
+// there is nothing a repeat delivery could contend for.
+static void shutdown_handler(int sig) {
+    (void)sig;
+    _exit(EXIT_SUCCESS);
 }
 
 int main(int argc, char **argv) {
@@ -192,23 +186,20 @@ int main(int argc, char **argv) {
     // A client hanging up mid-response must not kill the server.
     signal(SIGPIPE, SIG_IGN);
 
-    // Block SIGTERM/SIGINT in this thread *before* spawning the pool's
-    // workers or the signal-waiting thread below, so every thread the process
-    // ever has inherits the block (see the design note above).
-    sigemptyset(&shutdown_set);
-    sigaddset(&shutdown_set, SIGTERM);
-    sigaddset(&shutdown_set, SIGINT);
-    if (pthread_sigmask(SIG_BLOCK, &shutdown_set, NULL) != 0)
-        err(EXIT_FAILURE, "pthread_sigmask");
+    // Clean exit on SIGTERM/SIGINT via an async-signal-safe handler that only
+    // calls _exit() (see the design note above / docs/DECISIONS.md D17). No
+    // dedicated signal thread: the process stays at N workers + 1 dispatcher.
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = shutdown_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    if (sigaction(SIGTERM, &sa, NULL) != 0 || sigaction(SIGINT, &sa, NULL) != 0)
+        err(EXIT_FAILURE, "sigaction");
 
     threadpool_t *pool = threadpool_new(opts.n_threads, opts.n_threads, handle_connection);
     if (pool == NULL)
         errx(EXIT_FAILURE, "failed to create thread pool");
-
-    pthread_t sig_tid;
-    if (pthread_create(&sig_tid, NULL, signal_wait_thread, NULL) != 0)
-        errx(EXIT_FAILURE, "failed to create signal-handling thread");
-    pthread_detach(sig_tid);
 
     Listener_Socket sock;
     if (listener_init(&sock, opts.port) < 0)
@@ -232,6 +223,12 @@ int main(int argc, char **argv) {
 
 void handle_connection(int connfd) {
     conn_t *conn = conn_new(connfd);
+    // conn_new returns NULL on allocation failure; without this guard conn_parse
+    // would dereference NULL. Drop the connection (close the fd) and keep serving.
+    if (conn == NULL) {
+        close(connfd);
+        return;
+    }
     const Response_t *res = conn_parse(conn);
 
     if (res != NULL) {

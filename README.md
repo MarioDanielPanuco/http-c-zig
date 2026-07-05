@@ -4,8 +4,12 @@ An HTTP implementation in C with POSIX standards
 
 
 ### Multi\-threading design
-- I'm using a worker thread pool to manage parallelization.
-This means if I have N total threads, then there are $$n-1$$ workers in the thread pool and one dispatcher.
+- A worker thread pool manages parallelization. `-t N` creates **N worker
+threads**; the main thread is the dispatcher (it accepts connections and hands
+each to the pool). So the process runs **N workers + 1 dispatcher = N+1 OS
+threads**. `-t` defaults to 3 workers (4 OS threads total). See
+`docs/DECISIONS.md` D17 for the thread-count convention and the
+`test_scripts/threads_custom.sh` gate.
 
 
 ## Usage 
@@ -13,9 +17,10 @@ This means if I have N total threads, then there are $$n-1$$ workers in the thre
 ``` bash
 ./httpserver [-t threads] <port>
 ```
-For example, launching the server to listen on port (8080:80) with 2 threads: 
+`port` is a single TCP port number (32768–65535 in the test harness). For
+example, launching the server to listen on port 8080 with 2 worker threads:
 ```bash 
-./httpserver -t 2 8080:80 
+./httpserver -t 2 8080
 ```
 
 

@@ -52,7 +52,7 @@ It must be run from the repo root: it reads `workloads/*.toml` and
   its stderr captured as the audit log.
 - **`ztest/mock/main.zig`** — a minimal spec-following HTTP server (GET/PUT,
   per-URI locking, audit log, `Request-Id` capture) used to validate the
-  above while `src/*.c` doesn't build yet. See its module doc comment for
+  runner itself independently of the C server. See its module doc comment for
   the response-body convention (reason phrase + `\n`, lifted from
   `old_proj_states/asgn2/response.c`, which is also what `watson.py`
   literally compares against).
