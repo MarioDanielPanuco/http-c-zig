@@ -229,4 +229,38 @@ pub fn build(b: *std.Build) void {
 
     const test_http_step = b.step("test-http", "Run the ztest workload suite against a server binary (default: the mock; pass -- <path> for another)");
     test_http_step.dependOn(&run_runner.step);
+
+    // ---- bench: the nginx semantic differential oracle -------------------
+    // `zig build differential -- <workload.toml> <hostA:portA> <hostB:portB>
+    // <serve_root>` replays a workload against two servers and diffs their
+    // observable HTTP semantics (status + GET body bytes). It IMPORTS ztest's
+    // wire.zig + toml.zig read-only (same b.path mechanism the mock uses for
+    // wire), so it agrees with the driver/server on the wire format and the
+    // workload grammar by construction. bench/differential.sh owns launching
+    // ./httpserver + nginx and passing the endpoints; see that script.
+    const bench_mod = b.createModule(.{
+        .root_source_file = b.path("bench/differential.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    bench_mod.addImport("wire", b.createModule(.{
+        .root_source_file = b.path("ztest/src/wire.zig"),
+        .target = target,
+        .optimize = optimize,
+    }));
+    bench_mod.addImport("toml", b.createModule(.{
+        .root_source_file = b.path("ztest/src/toml.zig"),
+        .target = target,
+        .optimize = optimize,
+    }));
+    const bench_exe = b.addExecutable(.{
+        .name = "bench-differential",
+        .root_module = bench_mod,
+    });
+    b.installArtifact(bench_exe);
+
+    const run_bench = b.addRunArtifact(bench_exe);
+    if (b.args) |args| run_bench.addArgs(args);
+    const bench_step = b.step("differential", "Replay a workload against two servers and diff HTTP semantics (args: <workload.toml> <hostA:portA> <hostB:portB> <serve_root>)");
+    bench_step.dependOn(&run_bench.step);
 }

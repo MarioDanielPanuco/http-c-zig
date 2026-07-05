@@ -40,6 +40,7 @@
         #   netstat (2 sources) — test_scripts/utils.sh port polling
         #   valgrind            — M4 leak gate
         #   actionlint          — CI workflow linting
+        #   nginx/oha/wrk       — bench/ (nginx baseline + load generators)
         default = pkgs.mkShell {
           packages = with pkgs; [
             gnumake
@@ -56,6 +57,12 @@
             nettools
             valgrind
             actionlint
+            # bench/: nginx = the open-source baseline (ngx_http_dav_module is
+            # in nixpkgs' default nginx build, giving PUT), oha + wrk = the two
+            # load generators (see bench/bench.sh, bench/differential.sh).
+            nginx
+            oha
+            wrk
           ];
         };
       });

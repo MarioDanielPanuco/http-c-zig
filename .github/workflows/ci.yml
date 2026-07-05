@@ -84,3 +84,54 @@ jobs:
 
       - name: Run TSan stress suite
         run: test_scripts/san_stress.sh thread 10
+
+  differential:
+    # Gating: cross-check httpserver's HTTP semantics (status codes + GET body
+    # bytes) against nginx over the audit_* workloads. Deterministic, so it
+    # gates (unlike the perf benchmark below). See bench/differential.zig.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          # nginx-full ships ngx_http_dav_module (PUT); net-tools = netstat for
+          # test_scripts/utils.sh port polling (ss is already on the runner).
+          sudo apt-get install -y nginx-full net-tools
+
+      - name: Build C server
+        run: make clean && make
+
+      - name: Semantic differential vs nginx
+        run: bench/differential.sh
+
+  benchmark:
+    # Non-gating (informational): perf comparison httpserver vs nginx. CI
+    # runners are too noisy to threshold on, so this never fails the build; the
+    # results table is uploaded as an artifact. Uses the Nix devShell because
+    # oha isn't in apt (nginx + oha + wrk + zig all come from flake.nix).
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Benchmark httpserver vs nginx (small, informational)
+        run: nix develop -c env REQS=1000 CONC=20 DUR=3 bench/bench.sh
+
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results
+          path: bench/results/
+          if-no-files-found: ignore

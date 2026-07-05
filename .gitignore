@@ -16,6 +16,9 @@ zig-out/
 /oliver.out
 /stdout.txt
 
+# bench/ outputs (comparison tables + csv from bench/bench.sh)
+/bench/results/
+
 # Session scratch
 .superpowers/
 .claude/worktrees/

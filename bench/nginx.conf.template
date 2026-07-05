@@ -1,0 +1,50 @@
+# nginx config for the http-c-zig comparison — rendered at runtime by
+# bench/differential.sh and bench/bench.sh (they sed-substitute the __TOKENS__).
+#
+# Goal: make nginx as apples-to-apples with ./httpserver as its architecture
+# allows, so the comparison measures request handling, not connection reuse or
+# access logging that httpserver doesn't do.
+#   keepalive_timeout 0   -> one request per connection (httpserver close()s)
+#   worker_processes == N -> match ./httpserver -t N parallelism
+#   access_log off        -> httpserver's audit log is a separate thing we don't compare here
+#   dav_methods PUT        -> PUT-writes-file, like httpserver (ngx_http_dav_module)
+#
+# Everything is kept under __ROOT__ and logs go to stderr so it runs as a
+# normal (non-root) user on a high port.
+
+worker_processes  __WORKERS__;
+daemon            off;
+error_log         stderr error;
+pid               __ROOT__/nginx.pid;
+
+events {
+    worker_connections  1024;
+}
+
+http {
+    access_log            off;
+    sendfile              on;
+    default_type          application/octet-stream;
+    types_hash_max_size   4096;
+
+    # All scratch paths under __ROOT__ so no system dirs are needed.
+    client_body_temp_path __ROOT__/.client_temp;
+    proxy_temp_path       __ROOT__/.proxy_temp;
+    fastcgi_temp_path     __ROOT__/.fastcgi_temp;
+    uwsgi_temp_path       __ROOT__/.uwsgi_temp;
+    scgi_temp_path        __ROOT__/.scgi_temp;
+
+    server {
+        listen        127.0.0.1:__PORT__;
+        server_name   localhost;
+        root          __ROOT__;
+
+        keepalive_timeout   0;      # match httpserver's one-request-per-connection
+        client_max_body_size 0;     # no upload cap, like httpserver
+
+        location / {
+            dav_methods         PUT DELETE;
+            create_full_put_path on;
+        }
+    }
+}
