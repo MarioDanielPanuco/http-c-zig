@@ -175,15 +175,114 @@ fn printResult(name: []const u8, ok: bool) void {
     std.debug.print("  {s}: {s}\n", .{ name, if (ok) "PASS" else "FAIL" });
 }
 
-/// Spawns `bin_path -t threads <port>` in a fresh scratch directory,
-/// drives `events` against it, tears it down, and checks the resulting
-/// audit log for well-formedness + ordering (sherlock) + replay
-/// consistency (watson). Returns whether every check passed.
+/// Owns one spawned server process: fresh scratch cwd, free port, stderr
+/// (= audit log) drained on a background thread, readiness-probed via TCP.
+const ServerUnderTest = struct {
+    child: std.process.Child,
+    scratch: Scratch,
+    drain: *Drain,
+    drain_thread: std.Thread,
+    port: u16,
+    stopped: bool = false,
+
+    const Drain = struct {
+        file: std.fs.File,
+        gpa: std.mem.Allocator,
+        // gpa-owned (NOT the arena): audit.parseAuditLog stores slices
+        // *into* buf rather than copies, so it must outlive every use of
+        // the parsed ops -- freed only in deinit(), after all checks ran.
+        buf: std.ArrayList(u8) = .empty,
+
+        fn run(d: *Drain) void {
+            var chunk: [4096]u8 = undefined;
+            while (true) {
+                const n = d.file.read(&chunk) catch return;
+                if (n == 0) return;
+                d.buf.appendSlice(d.gpa, chunk[0..n]) catch return;
+            }
+        }
+    };
+
+    /// Spawns `bin_path -t threads <port>` with cwd set to a fresh scratch
+    /// directory and waits (up to 5s) for the port to accept connections.
+    /// `arena` owns the scratch path and the Drain struct itself.
+    fn start(
+        arena: std.mem.Allocator,
+        gpa: std.mem.Allocator,
+        bin_path: []const u8,
+        name: []const u8,
+        threads: u32,
+    ) !ServerUnderTest {
+        var scratch = try makeScratchDir(arena, name);
+        errdefer scratch.dir.close();
+
+        const port = try pickFreePort();
+
+        var threads_buf: [16]u8 = undefined;
+        const threads_str = try std.fmt.bufPrint(&threads_buf, "{d}", .{threads});
+        var port_buf: [16]u8 = undefined;
+        const port_str = try std.fmt.bufPrint(&port_buf, "{d}", .{port});
+
+        var child = std.process.Child.init(&.{ bin_path, "-t", threads_str, port_str }, gpa);
+        child.cwd = scratch.path;
+        child.stdin_behavior = .Ignore;
+        child.stdout_behavior = .Ignore;
+        child.stderr_behavior = .Pipe;
+        try child.spawn();
+
+        const drain = try arena.create(Drain);
+        drain.* = .{ .file = child.stderr.?, .gpa = gpa };
+        const drain_thread = std.Thread.spawn(.{}, Drain.run, .{drain}) catch |err| {
+            _ = child.kill() catch {};
+            return err;
+        };
+
+        if (!waitForListen("127.0.0.1", port, 5000)) {
+            std.debug.print("{s}: server never started listening on {d}\n", .{ name, port });
+            _ = child.kill() catch {};
+            drain_thread.join();
+            drain.buf.deinit(gpa);
+            return error.ServerNeverListened;
+        }
+
+        return .{
+            .child = child,
+            .scratch = scratch,
+            .drain = drain,
+            .drain_thread = drain_thread,
+            .port = port,
+        };
+    }
+
+    /// Kills the server (idempotent) and returns the complete audit-log
+    /// bytes. The slice is owned by this struct; valid until deinit().
+    fn stop(self: *ServerUnderTest) []const u8 {
+        if (!self.stopped) {
+            self.stopped = true;
+            _ = self.child.kill() catch {};
+            self.drain_thread.join();
+        }
+        return self.drain.buf.items;
+    }
+
+    fn deinit(self: *ServerUnderTest) void {
+        _ = self.stop();
+        self.drain.buf.deinit(self.drain.gpa);
+        self.scratch.dir.close();
+        // Best-effort: leaving a scratch dir behind is useful for debugging
+        // a failure, so cleanup errors are not fatal.
+        std.fs.deleteTreeAbsolute(self.scratch.path) catch {};
+    }
+};
+
+/// Spawns the server in a fresh scratch dir, drives `tables` against it,
+/// tears it down, and checks the resulting audit log for well-formedness +
+/// ordering (sherlock) + replay consistency (watson).
 fn runOne(
     gpa: std.mem.Allocator,
     bin_path: []const u8,
     name: []const u8,
-    events: []const toml.Table,
+    tables: []const toml.Table,
     threads: u32,
     repo_root: std.fs.Dir,
 ) !bool {
@@ -191,65 +290,12 @@ fn runOne(
     defer arena_state.deinit();
     const a = arena_state.allocator();
 
-    const evs = try ztest.events.decode(a, events);
+    const evs = try ztest.events.decode(a, tables);
 
-    var scratch = try makeScratchDir(a, name);
-    defer scratch.dir.close();
-    // Best-effort cleanup; leaving scratch dirs around on failure is
-    // useful for debugging so we don't hard-fail on cleanup errors.
-    defer std.fs.deleteTreeAbsolute(scratch.path) catch {};
+    var sut = try ServerUnderTest.start(a, gpa, bin_path, name, threads);
+    defer sut.deinit();
 
-    const port = try pickFreePort();
-
-    var threads_buf: [16]u8 = undefined;
-    const threads_str = try std.fmt.bufPrint(&threads_buf, "{d}", .{threads});
-    var port_buf: [16]u8 = undefined;
-    const port_str = try std.fmt.bufPrint(&port_buf, "{d}", .{port});
-
-    var child = std.process.Child.init(&.{ bin_path, "-t", threads_str, port_str }, gpa);
-    child.cwd = scratch.path;
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Pipe;
-    try child.spawn();
-
-    // audit_buf is gpa-owned (not the arena): audit.parseAuditLog stores
-    // slices *into* it rather than copies, so it must outlive every use of
-    // `parsed`/`order_result`/`replay_result` below -- freed only at the
-    // very end, after all three checks are done with it.
-    var audit_buf: std.ArrayList(u8) = .empty;
-    defer audit_buf.deinit(gpa);
-    const DrainCtx = struct {
-        file: std.fs.File,
-        buf: *std.ArrayList(u8),
-        gpa: std.mem.Allocator,
-        fn run(ctx: *@This()) void {
-            var chunk: [4096]u8 = undefined;
-            while (true) {
-                const n = ctx.file.read(&chunk) catch return;
-                if (n == 0) return;
-                ctx.buf.appendSlice(ctx.gpa, chunk[0..n]) catch return;
-            }
-        }
-    };
-    var drain_ctx = DrainCtx{ .file = child.stderr.?, .buf = &audit_buf, .gpa = gpa };
-    const drain_thread = try std.Thread.spawn(.{}, DrainCtx.run, .{&drain_ctx});
-
-    // Whatever happens below, make sure the child is dead and its stderr
-    // fully drained before we return (parsing needs the final bytes).
-    var killed = false;
-    defer if (!killed) {
-        _ = child.kill() catch {};
-        drain_thread.join();
-    };
-
-    const listened = waitForListen("127.0.0.1", port, 5000);
-    if (!listened) {
-        std.debug.print("{s}: server never started listening on {d}\n", .{ name, port });
-        return false;
-    }
-
-    var driver = oliver.Driver.init(gpa, "127.0.0.1", port, repo_root, scratch.dir);
+    var driver = oliver.Driver.init(gpa, "127.0.0.1", sut.port, repo_root, sut.scratch.dir);
     defer driver.deinit();
 
     var ok = true;
@@ -258,44 +304,45 @@ fn runOne(
         ok = false;
     };
 
-    _ = child.kill() catch {};
-    drain_thread.join();
-    killed = true;
+    const audit_text = sut.stop();
+    const parsed = try audit.parseAuditLog(a, audit_text);
+    report(&ok, parsed.result);
 
-    const parsed = try audit.parseAuditLog(a, audit_buf.items);
-    if (!parsed.result.ok) ok = false;
-    printMessages(parsed.result.messages.items);
-
-    // waitForListen() probes readiness by opening a TCP connection and
-    // immediately closing it without sending a request. A spec-correct server
-    // (verified against the authoritative olivertwist/sherlock/watson harness)
-    // treats that as a malformed request and emits one `UNSUPPORTED,,400,0`
-    // audit line per spawn. That phantom is not a workload request -- worse,
-    // left in it corrupts replay filesystem state (its rid collides with the
-    // workload's rid 0). Drop non-GET/PUT ops before the sherlock/watson
-    // checks; no suite workload issues any other method, so this only ever
-    // removes probe noise. Well-formedness above still runs over every line.
-    var driven_ops: std.ArrayList(audit.Op) = .empty;
-    for (parsed.ops.items) |op| {
-        if (std.mem.eql(u8, op.oper, "GET") or std.mem.eql(u8, op.oper, "PUT")) {
-            try driven_ops.append(a, op);
-        }
-    }
-    const ops = driven_ops.items;
+    const ops = try filterDrivenOps(a, parsed.ops.items);
 
     const order_result = try audit.checkOrdering(a, evs, ops);
-    if (!order_result.ok) ok = false;
-    printMessages(order_result.messages.items);
+    report(&ok, order_result);
 
     const replay_result = try audit.checkReplay(a, evs, ops, repo_root, driver.responses);
-    if (!replay_result.ok) ok = false;
-    printMessages(replay_result.messages.items);
+    report(&ok, replay_result);
 
     return ok;
 }
 
-fn printMessages(msgs: []const []const u8) void {
-    for (msgs) |m| std.debug.print("    - {s}\n", .{m});
+/// Folds one check's outcome into the overall verdict and prints its
+/// diagnostics.
+fn report(ok: *bool, result: audit.Result) void {
+    if (!result.ok) ok.* = false;
+    for (result.messages.items) |m| std.debug.print("    - {s}\n", .{m});
+}
+
+/// waitForListen() probes readiness by opening a TCP connection and
+/// immediately closing it without sending a request. A spec-correct server
+/// (verified against the authoritative olivertwist/sherlock/watson harness)
+/// treats that as a malformed request and emits one `UNSUPPORTED,,400,0`
+/// audit line per spawn. That phantom is not a workload request -- worse,
+/// left in it corrupts replay filesystem state (its rid collides with the
+/// workload's rid 0). Drop non-GET/PUT ops before the sherlock/watson
+/// checks; no suite workload issues any other method, so this only ever
+/// removes probe noise. Well-formedness still runs over every line.
+fn filterDrivenOps(a: std.mem.Allocator, ops: []const audit.Op) ![]const audit.Op {
+    var driven: std.ArrayList(audit.Op) = .empty;
+    for (ops) |op| {
+        if (std.mem.eql(u8, op.oper, "GET") or std.mem.eql(u8, op.oper, "PUT")) {
+            try driven.append(a, op);
+        }
+    }
+    return driven.toOwnedSlice(a);
 }
 
 const Scratch = struct {
