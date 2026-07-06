@@ -74,6 +74,31 @@ fn sendResponse(a: std.mem.Allocator, stream: std.net.Stream, code: u16, body: [
     if (body.len > 0) try stream.writeAll(body);
 }
 
+/// Reason-phrase-plus-newline response body (the asgn2 convention watson's
+/// replay compares against literally: "Not Found\n", "Created\n", ...).
+fn errorBody(a: std.mem.Allocator, code: u16) []const u8 {
+    return std.fmt.allocPrint(a, "{s}\n", .{statusReason(code)}) catch "";
+}
+
+/// The one ordering invariant this mock exists to model: the audit line is
+/// written while the per-URI lock is still held (so audit order matches the
+/// order of filesystem effects), and the response goes out after unlock.
+/// `lock` is null for requests that never took a URI lock (e.g. 501s).
+fn auditAndRespond(
+    a: std.mem.Allocator,
+    stream: std.net.Stream,
+    lock: ?*std.Thread.Mutex,
+    oper: []const u8,
+    uri: []const u8,
+    code: u16,
+    rid: []const u8,
+    body: []const u8,
+) void {
+    writeAudit(oper, uri, code, rid);
+    if (lock) |l| l.unlock();
+    sendResponse(a, stream, code, body) catch {};
+}
+
 /// Reads off `stream` until the header block (request line + headers) is
 /// fully buffered, returning the whole buffer read so far (which may
 /// include some leftover body bytes already in the same TCP segment).
@@ -108,37 +133,29 @@ fn handleConnection(gpa: std.mem.Allocator, stream: std.net.Stream) void {
         lock.lock();
         var code: u16 = 200;
         var body: []const u8 = &.{};
-        const file = std.fs.cwd().openFile(rl.uri, .{}) catch |err| {
+        if (std.fs.cwd().openFile(rl.uri, .{})) |file| {
+            defer file.close();
+            const stat = file.stat() catch null;
+            if (stat) |st| {
+                if (st.kind == .directory) code = 403;
+            }
+            if (code == 200) {
+                body = file.readToEndAlloc(a, 1 << 30) catch blk: {
+                    code = 500;
+                    break :blk errorBody(a, 500);
+                };
+            } else {
+                body = errorBody(a, code);
+            }
+        } else |err| {
             code = switch (err) {
                 error.FileNotFound => 404,
                 error.AccessDenied, error.IsDir => 403,
                 else => 500,
             };
-            body = std.fmt.allocPrint(a, "{s}\n", .{statusReason(code)}) catch "";
-            writeAudit("GET", rl.uri, code, rid);
-            lock.unlock();
-            sendResponse(a, stream, code, body) catch {};
-            return;
-        };
-        defer file.close();
-        const stat = file.stat() catch null;
-        if (stat) |st| {
-            if (st.kind == .directory) {
-                code = 403;
-            }
+            body = errorBody(a, code);
         }
-        if (code == 200) {
-            body = file.readToEndAlloc(a, 1 << 30) catch blk: {
-                code = 500;
-                break :blk "";
-            };
-            if (code == 500) body = std.fmt.allocPrint(a, "{s}\n", .{statusReason(code)}) catch "";
-        } else {
-            body = std.fmt.allocPrint(a, "{s}\n", .{statusReason(code)}) catch "";
-        }
-        writeAudit("GET", rl.uri, code, rid);
-        lock.unlock();
-        sendResponse(a, stream, code, body) catch {};
+        auditAndRespond(a, stream, lock, "GET", rl.uri, code, rid, body);
         return;
     }
 
@@ -161,10 +178,7 @@ fn handleConnection(gpa: std.mem.Allocator, stream: std.net.Stream) void {
                 error.AccessDenied, error.IsDir => 403,
                 else => 500,
             };
-            const body = std.fmt.allocPrint(a, "{s}\n", .{statusReason(code)}) catch "";
-            writeAudit("PUT", rl.uri, code, rid);
-            lock.unlock();
-            sendResponse(a, stream, code, body) catch {};
+            auditAndRespond(a, stream, lock, "PUT", rl.uri, code, rid, errorBody(a, code));
             return;
         };
         defer file.close();
@@ -189,18 +203,13 @@ fn handleConnection(gpa: std.mem.Allocator, stream: std.net.Stream) void {
         }
 
         const code: u16 = if (existed) 200 else 201;
-        const body = std.fmt.allocPrint(a, "{s}\n", .{statusReason(code)}) catch "";
-        writeAudit("PUT", rl.uri, code, rid);
-        lock.unlock();
-        sendResponse(a, stream, code, body) catch {};
+        auditAndRespond(a, stream, lock, "PUT", rl.uri, code, rid, errorBody(a, code));
         return;
     }
 
-    // Anything else -> 501, per spec.
-    const code: u16 = 501;
-    const body = std.fmt.allocPrint(a, "{s}\n", .{statusReason(code)}) catch "";
-    writeAudit(rl.method, rl.uri, code, rid);
-    sendResponse(a, stream, code, body) catch {};
+    // Anything else -> 501, per spec. No URI lock: nothing filesystem-visible
+    // happens, so there is no effect/log ordering to protect.
+    auditAndRespond(a, stream, null, rl.method, rl.uri, 501, rid, errorBody(a, 501));
 }
 
 pub fn main() !void {
