@@ -191,6 +191,8 @@ fn runOne(
     defer arena_state.deinit();
     const a = arena_state.allocator();
 
+    const evs = try ztest.events.decode(a, events);
+
     var scratch = try makeScratchDir(a, name);
     defer scratch.dir.close();
     // Best-effort cleanup; leaving scratch dirs around on failure is
@@ -251,7 +253,7 @@ fn runOne(
     defer driver.deinit();
 
     var ok = true;
-    driver.run(events) catch |err| {
+    driver.run(evs) catch |err| {
         std.debug.print("{s}: driver error: {t}\n", .{ name, err });
         ok = false;
     };

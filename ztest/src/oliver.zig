@@ -18,6 +18,7 @@
 //! ztest/README.md for the full list of known deviations.
 const std = @import("std");
 const toml = @import("toml.zig");
+const events = @import("events.zig");
 const wire = @import("wire.zig");
 
 pub const Conn = struct {
@@ -33,8 +34,6 @@ pub const Conn = struct {
 
 pub const DriverError = error{
     UnknownRequestId,
-    MissingField,
-    UnknownEventType,
 } || std.mem.Allocator.Error || std.net.TcpConnectToHostError || std.net.Stream.ReadError || std.net.Stream.WriteError || std.fs.File.OpenError || std.fs.Dir.WriteFileError || std.posix.ShutdownError;
 
 pub const Driver = struct {
@@ -76,70 +75,47 @@ pub const Driver = struct {
         return self.arena.allocator();
     }
 
-    pub fn run(self: *Driver, events: []const toml.Table) !void {
-        for (events) |ev| {
-            const t = ev.getStr("type") orelse continue;
-            if (std.mem.eql(u8, t, "LOAD")) {
-                try self.doLoad(ev);
-            } else if (std.mem.eql(u8, t, "UNLOAD")) {
-                self.doUnload(ev);
-            } else if (std.mem.eql(u8, t, "SLEEP")) {
-                const secs = ev.getInt("seconds") orelse 4;
-                std.Thread.sleep(@as(u64, @intCast(secs)) * std.time.ns_per_s);
-            } else if (std.mem.eql(u8, t, "CREATE")) {
-                try self.doCreate(ev);
-            } else if (std.mem.eql(u8, t, "SEND_LINE")) {
-                const c = try self.get(ev);
+    pub fn run(self: *Driver, evs: []const events.Event) !void {
+        for (evs) |ev| switch (ev) {
+            .load => |l| try self.doLoad(l.infile, l.outfile),
+            .unload => |u| self.serve_dir.deleteFile(u.file) catch {},
+            .sleep => |s| std.Thread.sleep(s.seconds * std.time.ns_per_s),
+            .create => |c| try self.doCreate(c),
+            .send_line => |e| {
+                const c = try self.conn(e.id);
                 try c.stream.writeAll(c.request_line);
-            } else if (std.mem.eql(u8, t, "SEND_HEADERS")) {
-                const c = try self.get(ev);
+            },
+            .send_headers => |e| {
+                const c = try self.conn(e.id);
                 try c.stream.writeAll(c.headers);
-            } else if (std.mem.eql(u8, t, "SEND_BODY")) {
-                const c = try self.get(ev);
-                try self.sendBody(c, ev.getInt("size"));
-            } else if (std.mem.eql(u8, t, "SEND_ALL")) {
-                const c = try self.get(ev);
+            },
+            .send_body => |e| try self.sendBody(try self.conn(e.id), e.size),
+            .send_all => |e| {
+                const c = try self.conn(e.id);
                 try c.stream.writeAll(c.request_line);
                 try c.stream.writeAll(c.headers);
                 try self.sendBody(c, null);
-            } else if (std.mem.eql(u8, t, "RECV_PARTIAL")) {
-                const c = try self.get(ev);
-                const size = ev.getInt("size") orelse 4096;
-                try self.recvPartial(c, @intCast(size));
-            } else if (std.mem.eql(u8, t, "WAIT")) {
-                try self.doWait(ev);
-            } else {
-                return DriverError.UnknownEventType;
-            }
-        }
+            },
+            .recv_partial => |e| try self.recvPartial(try self.conn(e.id), e.size),
+            .wait => |e| try self.doWait(e.id),
+        };
     }
 
-    fn doLoad(self: *Driver, ev: toml.Table) !void {
-        const infile = ev.getStr("infile") orelse return DriverError.MissingField;
-        const outfile = ev.getStr("outfile") orelse return DriverError.MissingField;
+    fn doLoad(self: *Driver, infile: []const u8, outfile: []const u8) !void {
         const bytes = try self.repo_root.readFileAlloc(self.a(), infile, 1 << 30);
         try self.serve_dir.writeFile(.{ .sub_path = outfile, .data = bytes });
     }
 
-    fn doUnload(self: *Driver, ev: toml.Table) void {
-        const file = ev.getStr("file") orelse return;
-        self.serve_dir.deleteFile(file) catch {};
-    }
-
-    fn doCreate(self: *Driver, ev: toml.Table) !void {
-        const id = ev.getId() orelse return DriverError.MissingField;
-        const uri = ev.getStr("uri") orelse return DriverError.MissingField;
-        const method = ev.getStr("method") orelse "GET";
-
+    fn doCreate(self: *Driver, c: events.Create) !void {
         var body: []const u8 = &.{};
-        if (ev.getStr("infile")) |infile| {
+        if (c.infile) |infile| {
             body = try self.repo_root.readFileAlloc(self.a(), infile, 1 << 30);
         }
 
-        const request_line = try std.fmt.allocPrint(self.a(), "{s} /{s} HTTP/1.1\r\n", .{ method, uri });
+        const request_line = try std.fmt.allocPrint(self.a(), "{s} /{s} HTTP/1.1\r\n", .{ c.method, c.uri });
 
         var headers: std.ArrayList(u8) = .empty;
-        try headers.print(self.a(), "Request-Id: {d}\r\n", .{id});
+        try headers.print(self.a(), "Request-Id: {d}\r\n", .{c.id});
         if (body.len > 0) {
             try headers.print(self.a(), "Content-Length: {d}\r\n", .{body.len});
         }
@@ -147,17 +123,16 @@ pub const Driver = struct {
 
         const stream = try std.net.tcpConnectToHost(self.a(), self.host, self.port);
 
-        try self.conns.put(id, .{
+        try self.conns.put(c.id, .{
             .stream = stream,
-            .method = method,
+            .method = c.method,
             .request_line = request_line,
             .headers = try headers.toOwnedSlice(self.a()),
             .body = body,
         });
     }
 
-    fn get(self: *Driver, ev: toml.Table) !*Conn {
-        const id = ev.getId() orelse return DriverError.MissingField;
+    fn conn(self: *Driver, id: i64) !*Conn {
         return self.conns.getPtr(id) orelse DriverError.UnknownRequestId;
     }
 
@@ -205,8 +180,7 @@ pub const Driver = struct {
         c.got_response = true;
     }
 
-    fn doWait(self: *Driver, ev: toml.Table) !void {
-        const id = ev.getId() orelse return DriverError.MissingField;
+    fn doWait(self: *Driver, id: i64) !void {
         var c = self.conns.get(id) orelse return DriverError.UnknownRequestId;
 
         if (!c.got_response) {
@@ -284,8 +258,10 @@ test "GET workload round-trips against a loopback echo-ish stub" {
     ;
     var w = try toml.parse(gpa, text);
     defer w.deinit();
+    const evs = try events.decode(gpa, w.events.items);
+    defer gpa.free(evs);
 
-    try driver.run(w.events.items);
+    try driver.run(evs);
 
     try std.testing.expectEqual(@as(u16, 200), driver.statuses.get(0).?);
     try std.testing.expectEqualStrings("OK\n", driver.responses.get(0).?);
