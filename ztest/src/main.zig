@@ -229,13 +229,11 @@ const ServerUnderTest = struct {
         child.stdout_behavior = .Ignore;
         child.stderr_behavior = .Pipe;
         try child.spawn();
+        errdefer _ = child.kill() catch {};
 
         const drain = try arena.create(Drain);
         drain.* = .{ .file = child.stderr.?, .gpa = gpa };
-        const drain_thread = std.Thread.spawn(.{}, Drain.run, .{drain}) catch |err| {
-            _ = child.kill() catch {};
-            return err;
-        };
+        const drain_thread = try std.Thread.spawn(.{}, Drain.run, .{drain});
 
         if (!waitForListen("127.0.0.1", port, 5000)) {
             std.debug.print("{s}: server never started listening on {d}\n", .{ name, port });
