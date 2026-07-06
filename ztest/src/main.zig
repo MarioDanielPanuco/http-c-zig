@@ -215,6 +215,7 @@ const ServerUnderTest = struct {
     ) !ServerUnderTest {
         var scratch = try makeScratchDir(arena, name);
         errdefer scratch.dir.close();
+        errdefer std.fs.deleteTreeAbsolute(scratch.path) catch {};
 
         const port = try pickFreePort();
 

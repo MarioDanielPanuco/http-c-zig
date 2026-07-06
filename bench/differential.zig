@@ -25,7 +25,6 @@
 const std = @import("std");
 const ztest = @import("ztest");
 const toml = ztest.toml;
-const wire = ztest.wire;
 
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const Digest = [Sha256.digest_length]u8;
