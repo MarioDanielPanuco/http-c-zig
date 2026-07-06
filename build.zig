@@ -165,56 +165,35 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the httpserver (built by zig)");
     run_step.dependOn(&run_cmd.step);
 
-    // ---- ztest: unit tests (TOML parser, audit-log checker, ...) --------
+    // ---- The shared ztest module (single instance) ------------------------
+    // Rooted at root.zig (toml/wire/events/audit/oliver). Every Zig tool
+    // imports THIS instance as "ztest": the runner, the mock, and the bench
+    // tools. One instance means toml.Table / events.Event are a single type
+    // everywhere -- which is what lets bench/differential.zig reuse
+    // oliver.Driver instead of carrying its own copy (Zig's module-identity
+    // rule makes types from separately-created module instances distinct).
     const ztest_mod = b.createModule(.{
         .root_source_file = b.path("ztest/src/root.zig"),
         .target = target,
         .optimize = optimize,
     });
 
-    // ---- ztest: the mock server (pure Zig, used to validate the runner) --
-    // Shares ztest's wire.zig (request/response line + header parsing) so
-    // the mock and the driver agree on the wire format by construction.
-    const mock_mod = b.createModule(.{
-        .root_source_file = b.path("ztest/mock/main.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    mock_mod.addImport("wire", b.createModule(.{
-        .root_source_file = b.path("ztest/src/wire.zig"),
-        .target = target,
-        .optimize = optimize,
-    }));
-    const mock_exe = b.addExecutable(.{
-        .name = "mock-httpserver",
-        .root_module = mock_mod,
-    });
-    b.installArtifact(mock_exe);
-
     const unit_tests = b.addTest(.{
         .root_module = ztest_mod,
     });
     const run_unit_tests = b.addRunArtifact(unit_tests);
-    const test_step = b.step("test", "Run ztest unit tests (TOML parser, audit checker)");
+    const test_step = b.step("test", "Run ztest unit tests (TOML parser, event decode, audit checker)");
     test_step.dependOn(&run_unit_tests.step);
+
+    // ---- ztest: the mock server (pure Zig, used to validate the runner) --
+    const mock_exe = addZtestTool(b, ztest_mod, target, optimize, "mock-httpserver", "ztest/mock/main.zig");
 
     // ---- ztest: the HTTP behavior runner ---------------------------------
     // `zig build test-http -- <path-to-server-binary>` drives the server
     // binary (make-built or zig-built) through the workload suite and
     // checks the audit log for well-formedness + linearizability, the way
     // olivertwist/sherlock/watson do together.
-    const runner_mod = b.createModule(.{
-        .root_source_file = b.path("ztest/src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    runner_mod.addImport("ztest", ztest_mod);
-
-    const runner_exe = b.addExecutable(.{
-        .name = "ztest-runner",
-        .root_module = runner_mod,
-    });
-    b.installArtifact(runner_exe);
+    const runner_exe = addZtestTool(b, ztest_mod, target, optimize, "ztest-runner", "ztest/src/main.zig");
 
     const run_runner = b.addRunArtifact(runner_exe);
     if (b.args) |args| {
@@ -226,68 +205,45 @@ pub fn build(b: *std.Build) void {
         // pulling in the C httpserver via the global install step.
         run_runner.addArtifactArg(mock_exe);
     }
-
     const test_http_step = b.step("test-http", "Run the ztest workload suite against a server binary (default: the mock; pass -- <path> for another)");
     test_http_step.dependOn(&run_runner.step);
 
     // ---- bench: the nginx semantic differential oracle -------------------
-    // `zig build differential -- <workload.toml> <hostA:portA> <hostB:portB>
-    // <serve_root>` replays a workload against two servers and diffs their
-    // observable HTTP semantics (status + GET body bytes). It IMPORTS ztest's
-    // wire.zig + toml.zig read-only (same b.path mechanism the mock uses for
-    // wire), so it agrees with the driver/server on the wire format and the
-    // workload grammar by construction. bench/differential.sh owns launching
-    // ./httpserver + nginx and passing the endpoints; see that script.
-    const bench_mod = b.createModule(.{
-        .root_source_file = b.path("bench/differential.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    bench_mod.addImport("wire", b.createModule(.{
-        .root_source_file = b.path("ztest/src/wire.zig"),
-        .target = target,
-        .optimize = optimize,
-    }));
-    bench_mod.addImport("toml", b.createModule(.{
-        .root_source_file = b.path("ztest/src/toml.zig"),
-        .target = target,
-        .optimize = optimize,
-    }));
-    const bench_exe = b.addExecutable(.{
-        .name = "bench-differential",
-        .root_module = bench_mod,
-    });
-    b.installArtifact(bench_exe);
-
+    // Replays a workload against two servers and diffs their observable HTTP
+    // semantics (status + GET body bytes). bench/differential.sh owns
+    // launching ./httpserver + nginx and passing the endpoints.
+    const bench_exe = addZtestTool(b, ztest_mod, target, optimize, "bench-differential", "bench/differential.zig");
     const run_bench = b.addRunArtifact(bench_exe);
     if (b.args) |args| run_bench.addArgs(args);
     const bench_step = b.step("differential", "Replay a workload against two servers and diff HTTP semantics (args: <workload.toml> <hostA:portA> <hostB:portB> <serve_root>)");
     bench_step.dependOn(&run_bench.step);
 
     // ---- bench: the Zig-native load generator ----------------------------
-    // `zig build loadgen -- <host:port> GET|PUT <path> [-c N] [-d SECS|-n REQS]
-    // [-b BODY]` drives closed-loop, one-request-per-connection load matching
-    // httpserver's model natively (no oha --disable-keepalive fudge, no wrk
-    // reconnect artifacts). Imports ztest's wire.zig read-only for status-line
-    // framing. bench/scaling.sh sweeps thread counts and calls this per point.
-    const loadgen_mod = b.createModule(.{
-        .root_source_file = b.path("bench/loadgen.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    loadgen_mod.addImport("wire", b.createModule(.{
-        .root_source_file = b.path("ztest/src/wire.zig"),
-        .target = target,
-        .optimize = optimize,
-    }));
-    const loadgen_exe = b.addExecutable(.{
-        .name = "bench-loadgen",
-        .root_module = loadgen_mod,
-    });
-    b.installArtifact(loadgen_exe);
-
+    const loadgen_exe = addZtestTool(b, ztest_mod, target, optimize, "bench-loadgen", "bench/loadgen.zig");
     const run_loadgen = b.addRunArtifact(loadgen_exe);
     if (b.args) |args| run_loadgen.addArgs(args);
     const loadgen_step = b.step("loadgen", "Closed-loop HTTP load generator (args: <host:port> GET|PUT <path> [-c N] [-d SECS|-n REQS] [-b BODY])");
     loadgen_step.dependOn(&run_loadgen.step);
+}
+
+/// One Zig tool executable wired to the single shared `ztest` module:
+/// createModule + addImport("ztest") + addExecutable + installArtifact.
+/// Run-step wiring stays at the call site (it differs per tool).
+fn addZtestTool(
+    b: *std.Build,
+    ztest_mod: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    name: []const u8,
+    root_source: []const u8,
+) *std.Build.Step.Compile {
+    const mod = b.createModule(.{
+        .root_source_file = b.path(root_source),
+        .target = target,
+        .optimize = optimize,
+    });
+    mod.addImport("ztest", ztest_mod);
+    const exe = b.addExecutable(.{ .name = name, .root_module = mod });
+    b.installArtifact(exe);
+    return exe;
 }

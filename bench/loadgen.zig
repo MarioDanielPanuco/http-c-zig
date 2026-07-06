@@ -25,7 +25,7 @@
 //!   <req_per_sec> <p50_ms> <p90_ms> <p99_ms> <requests> <errors> <mb_per_sec>
 //! Diagnostics go to stderr.
 const std = @import("std");
-const wire = @import("wire");
+const wire = @import("ztest").wire;
 
 const Config = struct {
     addr: std.net.Address,

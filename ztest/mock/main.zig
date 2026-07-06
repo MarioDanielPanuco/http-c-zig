@@ -24,7 +24,7 @@
 //! sizing -- but it means this mock can't stand in for the "N workers
 //! plus a dispatcher" thread-count grading check. See ztest/README.md.
 const std = @import("std");
-const wire = @import("wire");
+const wire = @import("ztest").wire;
 
 var log_mutex: std.Thread.Mutex = .{};
 var log_file: std.fs.File = undefined;

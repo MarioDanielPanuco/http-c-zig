@@ -11,10 +11,9 @@
 //!
 //! It shares ztest's wire.zig (status/header/body framing) and toml.zig
 //! (workload grammar) as read-only imports, so it agrees with the driver +
-//! server-under-test by construction. It does NOT reuse oliver.zig's Driver:
-//! reusing it would drag toml.Table across a second module boundary and hit
-//! Zig's module-identity rule; the replay we need for the audit_* fixtures
-//! (CREATE / SEND_ALL / WAIT / LOAD / UNLOAD) is small enough to inline.
+//! server-under-test by construction. Driver reuse becomes possible now that
+//! all tools share one ztest module instance; Task 6 of the 2026-07-05
+//! refactor does exactly that.
 //!
 //! Usage (see bench/differential.sh, which owns process lifecycle):
 //!   bench-differential <workload.toml> <hostA:portA> <hostB:portB> <serve_root>
@@ -23,8 +22,9 @@
 //! filesystem state each server sees is identical and there is no concurrent
 //! access to the shared root.
 const std = @import("std");
-const toml = @import("toml");
-const wire = @import("wire");
+const ztest = @import("ztest");
+const toml = ztest.toml;
+const wire = ztest.wire;
 
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const Digest = [Sha256.digest_length]u8;
