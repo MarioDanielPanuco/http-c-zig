@@ -283,11 +283,11 @@ fn runOne(
     }
     const ops = driven_ops.items;
 
-    const order_result = try audit.checkOrdering(a, events, ops);
+    const order_result = try audit.checkOrdering(a, evs, ops);
     if (!order_result.ok) ok = false;
     printMessages(order_result.messages.items);
 
-    const replay_result = try audit.checkReplay(a, events, ops, repo_root, driver.responses);
+    const replay_result = try audit.checkReplay(a, evs, ops, repo_root, driver.responses);
     if (!replay_result.ok) ok = false;
     printMessages(replay_result.messages.items);
 

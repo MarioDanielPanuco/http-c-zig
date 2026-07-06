@@ -16,6 +16,7 @@
 //!     driver actually observed on the wire?
 const std = @import("std");
 const toml = @import("toml.zig");
+const events = @import("events.zig");
 
 pub const Result = struct {
     ok: bool = true,
@@ -78,22 +79,9 @@ pub fn parseAuditLog(a: std.mem.Allocator, text: []const u8) !struct { ops: std.
     return .{ .ops = ops, .result = result };
 }
 
-/// Finds the CREATE event for a given request id (the one carrying
-/// method/uri/infile); returns null if the workload never created that id.
-fn findCreate(events: []const toml.Table, rid: i64) ?toml.Table {
-    for (events) |ev| {
-        const t = ev.getStr("type") orelse continue;
-        if (!std.mem.eql(u8, t, "CREATE")) continue;
-        if (ev.getId()) |id| {
-            if (id == rid) return ev;
-        }
-    }
-    return null;
-}
-
 /// sherlock: does the audit log present a valid total ordering of the
 /// partial order implied by the workload's CONNECT/WAIT events?
-pub fn checkOrdering(a: std.mem.Allocator, events: []const toml.Table, ops: []const Op) !Result {
+pub fn checkOrdering(a: std.mem.Allocator, evs: []const events.Event, ops: []const Op) !Result {
     var result = Result{};
 
     // happened[rid] = snapshot of `finished` at the moment rid was first
@@ -110,21 +98,19 @@ pub fn checkOrdering(a: std.mem.Allocator, events: []const toml.Table, ops: []co
     var seen_ids = std.AutoHashMap(i64, void).init(a);
     defer seen_ids.deinit();
 
-    for (events) |ev| {
-        const t = ev.getStr("type") orelse continue;
-        const rid = ev.getId() orelse continue;
-        if (std.mem.eql(u8, t, "CREATE")) {
-            if (!seen_ids.contains(rid)) {
-                try seen_ids.put(rid, {});
+    for (evs) |ev| switch (ev) {
+        .create => |c| {
+            if (!seen_ids.contains(c.id)) {
+                try seen_ids.put(c.id, {});
                 var snapshot = std.AutoHashMap(i64, void).init(a);
                 var it = finished.keyIterator();
                 while (it.next()) |k| try snapshot.put(k.*, {});
-                try happened.put(rid, snapshot);
+                try happened.put(c.id, snapshot);
             }
-        } else if (std.mem.eql(u8, t, "WAIT")) {
-            try finished.put(rid, {});
-        }
-    }
+        },
+        .wait => |w| try finished.put(w.id, {}),
+        else => {},
+    };
 
     var logged = std.AutoHashMap(i64, void).init(a);
     defer logged.deinit();
@@ -154,7 +140,7 @@ pub fn checkOrdering(a: std.mem.Allocator, events: []const toml.Table, ops: []co
 /// request id -> the response body bytes the driver actually received.
 pub fn checkReplay(
     a: std.mem.Allocator,
-    events: []const toml.Table,
+    evs: []const events.Event,
     ops: []const Op,
     repo_root: std.fs.Dir,
     responses: std.AutoHashMap(i64, []const u8),
@@ -166,24 +152,23 @@ pub fn checkReplay(
     const replay_dir = tmp.dir;
 
     // Seed with every LOAD in the workload (they always precede requests
-    // in these workloads; matching watson.py's `loads + ... `).
-    for (events) |ev| {
-        const t = ev.getStr("type") orelse continue;
-        if (!std.mem.eql(u8, t, "LOAD")) continue;
-        const infile = ev.getStr("infile") orelse continue;
-        const outfile = ev.getStr("outfile") orelse continue;
-        const bytes = repo_root.readFileAlloc(a, infile, 1 << 30) catch |err| {
-            try result.fail(a, "LOAD {s}: couldn't read from repo: {t}", .{ infile, err });
-            continue;
-        };
-        defer a.free(bytes);
-        try replay_dir.writeFile(.{ .sub_path = outfile, .data = bytes });
-    }
+    // in these workloads; matching watson.py's `loads + ...`).
+    outer: for (evs) |ev| switch (ev) {
+        .load => |l| {
+            const bytes = repo_root.readFileAlloc(a, l.infile, 1 << 30) catch |err| {
+                try result.fail(a, "LOAD {s}: couldn't read from repo: {t}", .{ l.infile, err });
+                continue :outer;
+            };
+            defer a.free(bytes);
+            try replay_dir.writeFile(.{ .sub_path = l.outfile, .data = bytes });
+        },
+        else => {},
+    };
 
     for (ops, 0..) |op, i| {
-        const create = findCreate(events, op.rid) orelse continue; // already reported by checkOrdering
-        const method = create.getStr("method") orelse "GET";
-        const uri = create.getStr("uri") orelse op.uri;
+        const create = events.findCreate(evs, op.rid) orelse continue; // already reported by checkOrdering
+        const method = create.method;
+        const uri = create.uri;
 
         // Spec requires Oper to be the literal request method (GET/PUT),
         // not e.g. the response's reason phrase -- a real bug this catches:
@@ -203,7 +188,7 @@ pub fn checkReplay(
                 },
             };
         } else if (std.mem.eql(u8, method, "PUT")) {
-            const infile = create.getStr("infile") orelse "";
+            const infile = create.infile orelse "";
             const existed = blk: {
                 replay_dir.access(uri, .{}) catch break :blk false;
                 break :blk true;
@@ -269,12 +254,15 @@ test "checkOrdering accepts a correctly-ordered sequential log" {
     var w = try toml.parse(a, text);
     defer w.deinit();
 
+    const evs = try events.decode(a, w.events.items);
+    defer a.free(evs);
+
     const audit_text = "GET,a.txt,200,0\nGET,b.txt,200,1\n";
     var parsed = try parseAuditLog(a, audit_text);
     defer parsed.ops.deinit(a);
     try std.testing.expect(parsed.result.ok);
 
-    var result = try checkOrdering(a, w.events.items, parsed.ops.items);
+    var result = try checkOrdering(a, evs, parsed.ops.items);
     defer result.messages.deinit(a);
     try std.testing.expect(result.ok);
 }
@@ -305,13 +293,16 @@ test "checkOrdering rejects a log that reorders sequential requests" {
     var w = try toml.parse(a, text);
     defer w.deinit();
 
+    const evs = try events.decode(a, w.events.items);
+    defer a.free(evs);
+
     // b.txt (id 1) connected only after a.txt (id 0) fully finished, so
     // the audit log MUST show id 0 before id 1. This log has it backwards.
     const audit_text = "GET,b.txt,200,1\nGET,a.txt,200,0\n";
     var parsed = try parseAuditLog(a, audit_text);
     defer parsed.ops.deinit(a);
 
-    var result = try checkOrdering(a, w.events.items, parsed.ops.items);
+    var result = try checkOrdering(a, evs, parsed.ops.items);
     defer {
         for (result.messages.items) |m| a.free(m);
         result.messages.deinit(a);
@@ -368,6 +359,9 @@ test "checkReplay matches a GET-then-PUT-then-GET sequence" {
     var w = try toml.parse(a, text);
     defer w.deinit();
 
+    const evs = try events.decode(a, w.events.items);
+    defer a.free(evs);
+
     // Order: 0 (404, not yet created) -> 1 (PUT creates it, 201) -> 2 (GET sees the new content)
     const audit_text = "GET,missing.txt,404,0\nPUT,missing.txt,201,1\nGET,missing.txt,200,2\n";
     var parsed = try parseAuditLog(a, audit_text);
@@ -379,7 +373,7 @@ test "checkReplay matches a GET-then-PUT-then-GET sequence" {
     try responses.put(1, "Created\n");
     try responses.put(2, "hello\n");
 
-    var result = try checkReplay(a, w.events.items, parsed.ops.items, repo_tmp.dir, responses);
+    var result = try checkReplay(a, evs, parsed.ops.items, repo_tmp.dir, responses);
     defer {
         for (result.messages.items) |m| a.free(m);
         result.messages.deinit(a);
@@ -412,6 +406,9 @@ test "checkReplay flags a response body that disagrees with the claimed order" {
     var w = try toml.parse(a, text);
     defer w.deinit();
 
+    const evs = try events.decode(a, w.events.items);
+    defer a.free(evs);
+
     const audit_text = "PUT,f.txt,201,0\nGET,f.txt,200,1\n";
     var parsed = try parseAuditLog(a, audit_text);
     defer parsed.ops.deinit(a);
@@ -424,7 +421,7 @@ test "checkReplay flags a response body that disagrees with the claimed order" {
     // happened first.
     try responses.put(1, "SOMETHING ELSE ENTIRELY\n");
 
-    var result = try checkReplay(a, w.events.items, parsed.ops.items, repo_tmp.dir, responses);
+    var result = try checkReplay(a, evs, parsed.ops.items, repo_tmp.dir, responses);
     defer {
         for (result.messages.items) |m| a.free(m);
         result.messages.deinit(a);
