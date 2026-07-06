@@ -9,11 +9,12 @@
 //! (no stock server emits that log), so it stays checked by ztest alone; here we
 //! only compare what any HTTP client can observe.
 //!
-//! It shares ztest's wire.zig (status/header/body framing) and toml.zig
-//! (workload grammar) as read-only imports, so it agrees with the driver +
-//! server-under-test by construction. Driver reuse becomes possible now that
-//! all tools share one ztest module instance; Task 6 of the 2026-07-05
-//! refactor does exactly that.
+//! It reuses ztest's toml.zig (workload grammar), events.zig (typed event
+//! decode), wire.zig (status/header/body framing), AND oliver.zig's Driver
+//! (raw-TCP replay) via the single shared `ztest` module -- so it agrees
+//! with the audit suite's driver and the server-under-test by construction.
+//! The only differential-specific pieces are the Host header (nginx requires
+//! one), the sha256 observation digests, and the divergence allowlist below.
 //!
 //! Usage (see bench/differential.sh, which owns process lifecycle):
 //!   bench-differential <workload.toml> <hostA:portA> <hostB:portB> <serve_root>
@@ -48,119 +49,40 @@ fn parseEndpoint(s: []const u8) !Endpoint {
     };
 }
 
-const Conn = struct {
-    stream: std.net.Stream,
-    is_put: bool,
-    request_line: []const u8,
-    headers: []const u8,
-    body: []const u8,
-};
-
-/// Replay `events` against one server, recording per-rid observations in `out`.
-/// LOAD/UNLOAD are applied to `root` inline (matching olivertwist/oliver.zig),
-/// so the server sees the expected files at each step.
+/// Replay `evs` against one server via ztest's Driver (the same code path
+/// the audit suite uses -- agreement by construction), then hash what was
+/// observed per request id into `out`.
+///
+/// LOAD/UNLOAD apply to `root` (the serve dir both servers share);
+/// infile paths resolve against the repo root (cwd), matching the runner.
 fn replay(
     gpa: std.mem.Allocator,
     ep: Endpoint,
     root: std.fs.Dir,
-    events: []const toml.Table,
+    evs: []const ztest.events.Event,
     out: *ObsMap,
 ) !void {
-    var arena_state = std.heap.ArenaAllocator.init(gpa);
-    defer arena_state.deinit();
-    const a = arena_state.allocator();
+    var driver = ztest.oliver.Driver.init(gpa, ep.host, ep.port, std.fs.cwd(), root, .{
+        // HTTP/1.1 requires a Host header; nginx enforces it (400 without),
+        // httpserver ignores it. The runner omits it because it only ever
+        // talks to httpserver.
+        .extra_headers = "Host: localhost\r\n",
+    });
+    defer driver.deinit();
 
-    var conns = std.AutoHashMap(i64, Conn).init(gpa);
-    defer {
-        var it = conns.valueIterator();
-        while (it.next()) |c| c.stream.close();
-        conns.deinit();
-    }
+    try driver.run(evs);
 
-    for (events) |ev| {
-        const t = ev.getStr("type") orelse continue;
-
-        if (std.mem.eql(u8, t, "LOAD")) {
-            const infile = ev.getStr("infile") orelse return error.MissingField;
-            const outfile = ev.getStr("outfile") orelse return error.MissingField;
-            const bytes = try std.fs.cwd().readFileAlloc(a, infile, 1 << 30);
-            try root.writeFile(.{ .sub_path = outfile, .data = bytes });
-        } else if (std.mem.eql(u8, t, "UNLOAD")) {
-            const file = ev.getStr("file") orelse return error.MissingField;
-            root.deleteFile(file) catch {};
-        } else if (std.mem.eql(u8, t, "SLEEP")) {
-            const secs = ev.getInt("seconds") orelse 0;
-            if (secs > 0) std.Thread.sleep(@as(u64, @intCast(secs)) * std.time.ns_per_s);
-        } else if (std.mem.eql(u8, t, "CREATE")) {
-            const id = ev.getId() orelse return error.MissingField;
-            const uri = ev.getStr("uri") orelse return error.MissingField;
-            const method = ev.getStr("method") orelse "GET";
-
-            var body: []const u8 = &.{};
-            if (ev.getStr("infile")) |infile| {
-                body = try std.fs.cwd().readFileAlloc(a, infile, 1 << 30);
-            }
-
-            const request_line = try std.fmt.allocPrint(a, "{s} /{s} HTTP/1.1\r\n", .{ method, uri });
-            var headers: std.ArrayList(u8) = .empty;
-            // HTTP/1.1 requires a Host header; nginx enforces it (400 without),
-            // httpserver ignores it. Send it so the request is well-formed for
-            // both. oliver.zig omits it because it only ever talks to httpserver.
-            try headers.appendSlice(a, "Host: localhost\r\n");
-            try headers.print(a, "Request-Id: {d}\r\n", .{id});
-            if (body.len > 0) try headers.print(a, "Content-Length: {d}\r\n", .{body.len});
-            try headers.appendSlice(a, "\r\n");
-
-            const stream = try std.net.tcpConnectToHost(a, ep.host, ep.port);
-            try conns.put(id, .{
-                .stream = stream,
-                .is_put = std.mem.eql(u8, method, "PUT"),
-                .request_line = request_line,
-                .headers = try headers.toOwnedSlice(a),
-                .body = body,
-            });
-        } else if (std.mem.eql(u8, t, "SEND_ALL")) {
-            const id = ev.getId() orelse return error.MissingField;
-            const c = conns.getPtr(id) orelse return error.UnknownRequestId;
-            try c.stream.writeAll(c.request_line);
-            try c.stream.writeAll(c.headers);
-            if (c.body.len > 0) try c.stream.writeAll(c.body);
-            // half-close so the server sees EOF on the request body (mirrors
-            // oliver.zig's shutdown(SHUT_WR) after the whole body is sent).
-            std.posix.shutdown(c.stream.handle, .send) catch {};
-        } else if (std.mem.eql(u8, t, "WAIT")) {
-            const id = ev.getId() orelse return error.MissingField;
-            const c = conns.getPtr(id) orelse return error.UnknownRequestId;
-
-            var recv: std.ArrayList(u8) = .empty;
-            var buf: [8192]u8 = undefined;
-            while (true) {
-                // A peer reset ends the response read gracefully rather than
-                // aborting the whole run; we score whatever was received.
-                const n = c.stream.read(&buf) catch |err| switch (err) {
-                    error.ConnectionResetByPeer => break,
-                    else => return err,
-                };
-                if (n == 0) break;
-                try recv.appendSlice(a, buf[0..n]);
-            }
-
-            const status: u16 = if (wire.parseStatusLine(recv.items)) |sl| sl.code else 0;
-            const body_start = wire.findBodyStart(recv.items) orelse recv.items.len;
-            var digest: Digest = undefined;
-            Sha256.hash(recv.items[body_start..], &digest, .{});
-
-            try out.put(id, .{ .status = status, .body = digest, .is_put = c.is_put });
-            c.stream.close();
-            _ = conns.remove(id);
-        } else {
-            std.debug.print(
-                "differential: unsupported event type '{s}' -- only the audit_* fixtures " ++
-                    "(CREATE/SEND_ALL/WAIT/LOAD/UNLOAD/SLEEP) are supported\n",
-                .{t},
-            );
-            return error.UnsupportedEvent;
-        }
+    var it = driver.responses.iterator();
+    while (it.next()) |entry| {
+        const rid = entry.key_ptr.*;
+        const status = driver.statuses.get(rid) orelse 0; // 0 = unparseable status line
+        var digest: Digest = undefined;
+        Sha256.hash(entry.value_ptr.*, &digest, .{});
+        const is_put = if (ztest.events.findCreate(evs, rid)) |c|
+            std.mem.eql(u8, c.method, "PUT")
+        else
+            false;
+        try out.put(rid, .{ .status = status, .body = digest, .is_put = is_put });
     }
 }
 
@@ -222,6 +144,8 @@ pub fn main() !void {
     defer gpa.free(text);
     var w = try toml.parse(gpa, text);
     defer w.deinit();
+    const evs = try ztest.events.decode(gpa, w.events.items);
+    defer gpa.free(evs);
 
     var root = try std.fs.cwd().openDir(root_path, .{});
     defer root.close();
@@ -232,8 +156,8 @@ pub fn main() !void {
     defer obsB.deinit();
 
     // Sequential passes over the shared root; each re-applies LOAD/UNLOAD.
-    try replay(gpa, epA, root, w.events.items, &obsA);
-    try replay(gpa, epB, root, w.events.items, &obsB);
+    try replay(gpa, epA, root, evs, &obsA);
+    try replay(gpa, epB, root, evs, &obsB);
 
     var mismatches: usize = 0;
 

@@ -42,6 +42,7 @@ pub const Driver = struct {
     port: u16,
     repo_root: std.fs.Dir,
     serve_dir: std.fs.Dir,
+    opts: Options,
     conns: std.AutoHashMap(i64, Conn),
     /// rid -> the response body bytes actually observed on the wire
     /// (arena-owned), filled in as WAIT events complete.
@@ -49,13 +50,29 @@ pub const Driver = struct {
     /// rid -> HTTP status code actually observed.
     statuses: std.AutoHashMap(i64, u16),
 
-    pub fn init(gpa: std.mem.Allocator, host: []const u8, port: u16, repo_root: std.fs.Dir, serve_dir: std.fs.Dir) Driver {
+    pub const Options = struct {
+        /// Extra raw header bytes prepended to every request's header block
+        /// (e.g. "Host: localhost\r\n" -- nginx rejects Host-less HTTP/1.1
+        /// with 400; httpserver ignores the header). Empty for the ztest
+        /// runner, so its wire bytes are unchanged.
+        extra_headers: []const u8 = "",
+    };
+
+    pub fn init(
+        gpa: std.mem.Allocator,
+        host: []const u8,
+        port: u16,
+        repo_root: std.fs.Dir,
+        serve_dir: std.fs.Dir,
+        opts: Options,
+    ) Driver {
         return .{
             .arena = std.heap.ArenaAllocator.init(gpa),
             .host = host,
             .port = port,
             .repo_root = repo_root,
             .serve_dir = serve_dir,
+            .opts = opts,
             .conns = std.AutoHashMap(i64, Conn).init(gpa),
             .responses = std.AutoHashMap(i64, []const u8).init(gpa),
             .statuses = std.AutoHashMap(i64, u16).init(gpa),
@@ -115,6 +132,7 @@ pub const Driver = struct {
         const request_line = try std.fmt.allocPrint(self.a(), "{s} /{s} HTTP/1.1\r\n", .{ c.method, c.uri });
 
         var headers: std.ArrayList(u8) = .empty;
+        try headers.appendSlice(self.a(), self.opts.extra_headers);
         try headers.print(self.a(), "Request-Id: {d}\r\n", .{c.id});
         if (body.len > 0) {
             try headers.print(self.a(), "Content-Length: {d}\r\n", .{body.len});
@@ -173,7 +191,10 @@ pub const Driver = struct {
     fn recvUntilClosed(self: *Driver, c: *Conn) !void {
         var buf: [8192]u8 = undefined;
         while (true) {
-            const n = try c.stream.read(&buf);
+            const n = c.stream.read(&buf) catch |err| switch (err) {
+                error.ConnectionResetByPeer => break,
+                else => return err,
+            };
             if (n == 0) break;
             try c.received.appendSlice(self.a(), buf[0..n]);
         }
@@ -238,7 +259,7 @@ test "GET workload round-trips against a loopback echo-ish stub" {
     var serve_tmp = std.testing.tmpDir(.{});
     defer serve_tmp.cleanup();
 
-    var driver = Driver.init(gpa, "127.0.0.1", port, repo_tmp.dir, serve_tmp.dir);
+    var driver = Driver.init(gpa, "127.0.0.1", port, repo_tmp.dir, serve_tmp.dir, .{});
     defer driver.deinit();
 
     const text =

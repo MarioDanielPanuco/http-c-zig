@@ -293,7 +293,7 @@ fn runOne(
     var sut = try ServerUnderTest.start(a, gpa, bin_path, name, threads);
     defer sut.deinit();
 
-    var driver = oliver.Driver.init(gpa, "127.0.0.1", sut.port, repo_root, sut.scratch.dir);
+    var driver = oliver.Driver.init(gpa, "127.0.0.1", sut.port, repo_root, sut.scratch.dir, .{});
     defer driver.deinit();
 
     var ok = true;
