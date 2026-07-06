@@ -2,8 +2,7 @@
 //! a flat list of `[[events]]` tables, each holding `key = value` pairs
 //! where value is either a quoted string or a bare integer. No nested
 //! tables, no arrays-of-values, no floats, no multi-line strings — none of
-//! that vocabulary appears in the workload files (see docs and
-//! test_scripts/olivertwist.py, which is the reference reader).
+//! that vocabulary appears in the workload files.
 const std = @import("std");
 
 pub const Value = union(enum) {

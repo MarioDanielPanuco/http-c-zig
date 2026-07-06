@@ -1,17 +1,16 @@
-//! A minimal spec-following HTTP server, used ONLY to validate ztest's
-//! runner/checker logic while the real C httpserver (src/*.c) doesn't
-//! build yet (see docs/PLAN.md). Implements just enough of
-//! httpserver-spec to be a faithful stand-in:
+//! A minimal spec-following HTTP server used to validate ztest's runner and
+//! checkers independently of the C server: because it's known-good, a
+//! workload that fails against it points at a bug in the runner, not in
+//! src/*.c. Implements just enough of httpserver-spec to be a faithful
+//! stand-in:
 //!   - `./mock-httpserver [-t threads] [-l logfile] <port>`
 //!   - GET/PUT on flat URIs relative to its cwd (403/404/500 mapped the
 //!     same way the spec describes)
 //!   - one audit line per request: "Oper,URI,Status,RequestID\n"
-//!   - response body convention lifted from old_proj_states/asgn2/response.c
-//!     (still the base this repo's asgn4 code descends from): the reason
-//!     phrase + "\n" for anything that isn't a successful GET, and the
-//!     literal file bytes for a successful GET. That convention is also
-//!     what test_scripts/watson.py's replay literally compares against
-//!     ("OK", "Created", "Not Found").
+//!   - the response body convention the replay check compares against
+//!     literally ("OK", "Created", "Not Found"): the reason phrase + "\n"
+//!     for anything that isn't a successful GET, and the literal file bytes
+//!     for a successful GET.
 //!   - per-URI locking (so different URIs proceed in parallel, same-URI
 //!     requests serialize, and the audit-log write happens inside the
 //!     same critical section as the file op, which is what keeps log
@@ -74,8 +73,8 @@ fn sendResponse(a: std.mem.Allocator, stream: std.net.Stream, code: u16, body: [
     if (body.len > 0) try stream.writeAll(body);
 }
 
-/// Reason-phrase-plus-newline response body (the asgn2 convention watson's
-/// replay compares against literally: "Not Found\n", "Created\n", ...).
+/// Reason-phrase-plus-newline response body (what the replay check compares
+/// against literally: "Not Found\n", "Created\n", ...).
 fn errorBody(a: std.mem.Allocator, code: u16) []const u8 {
     return std.fmt.allocPrint(a, "{s}\n", .{statusReason(code)}) catch "";
 }

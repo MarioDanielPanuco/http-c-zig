@@ -1,13 +1,11 @@
-//! Audit-log checking: the Zig-native replacement for sherlock.py +
-//! watson.py, operating directly on a parsed workload (toml.Workload)
-//! instead of a separately-recorded oliver send-log. That's a valid
-//! simplification here: ztest's driver (oliver.zig) executes workload
-//! events strictly in file order (no background/eager draining like the
-//! Python reference), so "the order events were issued in" is always
-//! exactly "the order they appear in the TOML file" -- there is no need to
-//! separately record a timestamped send-log to reconstruct that order.
+//! Audit-log checking: operates directly on a parsed workload
+//! (toml.Workload) rather than a separately-recorded send-log. That works
+//! because the driver (oliver.zig) issues workload events strictly in file
+//! order, so "the order events were issued in" is always exactly "the order
+//! they appear in the TOML file" -- there is no need to record a timestamped
+//! send-log to reconstruct that order.
 //!
-//! Two checks, matching the two detectives:
+//! Two checks:
 //!   - `checkOrdering` (sherlock): is the audit log a linear extension of
 //!     the partial order implied by the workload (if R2 connects only
 //!     after R1's WAIT completed, R1 must be logged first)?
@@ -85,8 +83,8 @@ pub fn checkOrdering(a: std.mem.Allocator, evs: []const events.Event, ops: []con
     var result = Result{};
 
     // happened[rid] = snapshot of `finished` at the moment rid was first
-    // created (CREATE is always first per id in these workloads, matching
-    // olivertwist's CONNECT).
+    // created (CREATE is always the first event for an id in these
+    // workloads, so it marks when the request connected).
     var happened = std.AutoHashMap(i64, std.AutoHashMap(i64, void)).init(a);
     defer {
         var vit = happened.valueIterator();
@@ -152,7 +150,7 @@ pub fn checkReplay(
     const replay_dir = tmp.dir;
 
     // Seed with every LOAD in the workload (they always precede requests
-    // in these workloads; matching watson.py's `loads + ...`).
+    // in these workloads).
     outer: for (evs) |ev| switch (ev) {
         .load => |l| {
             const bytes = repo_root.readFileAlloc(a, l.infile, 1 << 30) catch |err| {

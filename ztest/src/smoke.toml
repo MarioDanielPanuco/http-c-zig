@@ -1,0 +1,62 @@
+# Phase-1 smoke workload for ztest-runner: a self-contained sequence that
+# exercises PUT 201 (create), PUT 200 (overwrite), GET 200 (hit), and
+# GET 404 (miss) over raw TCP, independent of the workloads/ fixtures.
+# `infile` points at this file itself so the fixture carries its own payload.
+
+[[events]]
+type = "CREATE"
+method = "PUT"
+uri = "ztest-smoke.txt"
+infile = "ztest/src/smoke.toml"
+id = 0
+
+[[events]]
+type = "SEND_ALL"
+id = 0
+
+[[events]]
+type = "WAIT"
+id = 0
+
+[[events]]
+type = "CREATE"
+method = "PUT"
+uri = "ztest-smoke.txt"
+infile = "ztest/src/smoke.toml"
+id = 1
+
+[[events]]
+type = "SEND_ALL"
+id = 1
+
+[[events]]
+type = "WAIT"
+id = 1
+
+[[events]]
+type = "CREATE"
+method = "GET"
+uri = "ztest-smoke.txt"
+id = 2
+
+[[events]]
+type = "SEND_ALL"
+id = 2
+
+[[events]]
+type = "WAIT"
+id = 2
+
+[[events]]
+type = "CREATE"
+method = "GET"
+uri = "ztest-smoke-missing.txt"
+id = 3
+
+[[events]]
+type = "SEND_ALL"
+id = 3
+
+[[events]]
+type = "WAIT"
+id = 3

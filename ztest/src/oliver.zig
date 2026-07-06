@@ -1,21 +1,13 @@
-//! The workload driver: a Zig replacement for test_scripts/olivertwist.py.
-//! Talks raw TCP (std.net.Stream read/write, not std.http.Client) so
-//! malformed/partial requests stay expressible, exactly like the Python
-//! original.
+//! The workload driver: talks raw TCP (std.net.Stream read/write, not
+//! std.http.Client) so malformed/partial requests stay expressible.
 //!
-//! Simplification vs. olivertwist.py: this driver executes workload events
-//! strictly serially, in file order, with plain blocking socket calls.
-//! olivertwist.py is *also* serial except for one thing: an opportunistic
-//! epoll-based background drain (`readem`) that (a) caps the number of
-//! concurrently-open sockets under `-m/--maxreqs`, and (b) lets a response
-//! get read before its explicit WAIT if the OS happens to deliver it
-//! early. Neither changes what's observable to sherlock/watson: the
-//! ordering check only cares about explicit CONNECT/WAIT events (which
-//! stay in file order here by construction), and the replay check only
-//! cares about the final bytes each WAIT captured, not when they arrived.
-//! The workload files ztest targets are small enough (dozens of
-//! connections) that the fd-capping concern doesn't apply either. See
-//! ztest/README.md for the full list of known deviations.
+//! The driver executes workload events strictly serially, in file order,
+//! with plain blocking socket calls. That's sufficient for the ordering and
+//! replay checks: ordering only depends on the explicit CONNECT/WAIT events
+//! (kept in file order here by construction), and replay only depends on the
+//! final bytes each WAIT captured, not on when they arrived. The workloads
+//! are small (dozens of connections), so serial execution costs nothing
+//! meaningful. See ztest/README.md for the full list of known deviations.
 const std = @import("std");
 const toml = @import("toml.zig");
 const events = @import("events.zig");
@@ -168,8 +160,9 @@ pub const Driver = struct {
         }
         c.sent = end;
         if (c.sent == total) {
-            // Mirrors olivertwist.py's `sock.shutdown(SHUT_WR)` once the
-            // whole body (possibly zero bytes, for GET) has been sent.
+            // Half-close the write side once the whole body (possibly zero
+            // bytes, for GET) has been sent, so the server reads EOF on the
+            // request and stops waiting for more.
             std.posix.shutdown(c.stream.handle, .send) catch |err| switch (err) {
                 error.SocketNotConnected => {},
                 else => return err,

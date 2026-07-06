@@ -1,16 +1,18 @@
-//! ztest-runner: the Zig-native replacement for
-//! test_scripts/{olivertwist,sherlock,watson}.py + test_repo.sh.
+//! ztest-runner: drives a server binary through the workload suite and
+//! checks its audit log for well-formedness, ordering, and replay
+//! consistency.
 //!
 //! Usage: ztest-runner <path-to-server-binary>
 //!   (or set HTTPSERVER_BIN instead of passing an argument)
 //!
-//! Must be run from the repo root (same requirement the bash harness has:
-//! it reads workloads/*.toml and test_files/*).
+//! Must be run from the repo root: it reads workloads/*.toml and test_files/*
+//! by relative path.
 //!
-//! Phase 1 (smoke): a hand-written tiny workload exercising GET 200/404
-//! and PUT 200/201 over raw TCP, independent of the workloads/ fixtures.
-//! Phase 2: every workload in workloads/ that test_scripts/*.sh actually
-//! exercises (see WORKLOADS below), replaying sherlock+watson's checks.
+//! Phase 1 (smoke): a tiny self-contained workload (see smoke.toml) exercising
+//! GET 200/404 and PUT 200/201 over raw TCP, independent of the workloads/
+//! fixtures.
+//! Phase 2: every workload in WORKLOADS below, running the ordering and
+//! replay checks against each.
 const std = @import("std");
 const ztest = @import("ztest");
 const toml = ztest.toml;
@@ -22,10 +24,9 @@ const WorkloadSpec = struct {
     threads: u32,
 };
 
-// Mirrors test_scripts/*.sh's (workload, thread-count) pairs -- the same
-// set test_repo.sh runs, plus nconflict_pause_puts.toml which has no .sh
-// wrapper but belongs to the same family. See docs/PLAN.md M2/M3 accept
-// criteria.
+// The (workload, thread-count) pairs the suite runs: the audit_* workloads
+// single-threaded, the conflict_*/nconflict_* workloads with 4 workers so
+// same-URI serialization and cross-URI concurrency are both exercised.
 const WORKLOADS = [_]WorkloadSpec{
     .{ .file = "workloads/audit_get.toml", .threads = 1 },
     .{ .file = "workloads/audit_put.toml", .threads = 1 },
@@ -39,67 +40,12 @@ const WORKLOADS = [_]WorkloadSpec{
     .{ .file = "workloads/nconflict_stress.toml", .threads = 4 },
 };
 
-const SMOKE_TOML =
-    \\[[events]]
-    \\type = "CREATE"
-    \\method = "PUT"
-    \\uri = "ztest-smoke.txt"
-    \\infile = "ztest/src/main.zig"
-    \\id = 0
-    \\
-    \\[[events]]
-    \\type = "SEND_ALL"
-    \\id = 0
-    \\
-    \\[[events]]
-    \\type = "WAIT"
-    \\id = 0
-    \\
-    \\[[events]]
-    \\type = "CREATE"
-    \\method = "PUT"
-    \\uri = "ztest-smoke.txt"
-    \\infile = "ztest/src/main.zig"
-    \\id = 1
-    \\
-    \\[[events]]
-    \\type = "SEND_ALL"
-    \\id = 1
-    \\
-    \\[[events]]
-    \\type = "WAIT"
-    \\id = 1
-    \\
-    \\[[events]]
-    \\type = "CREATE"
-    \\method = "GET"
-    \\uri = "ztest-smoke.txt"
-    \\id = 2
-    \\
-    \\[[events]]
-    \\type = "SEND_ALL"
-    \\id = 2
-    \\
-    \\[[events]]
-    \\type = "WAIT"
-    \\id = 2
-    \\
-    \\[[events]]
-    \\type = "CREATE"
-    \\method = "GET"
-    \\uri = "ztest-smoke-missing.txt"
-    \\id = 3
-    \\
-    \\[[events]]
-    \\type = "SEND_ALL"
-    \\id = 3
-    \\
-    \\[[events]]
-    \\type = "WAIT"
-    \\id = 3
-;
+// The smoke workload lives in its own fixture file, embedded at compile
+// time so the runner stays a single self-contained binary.
+const SMOKE_TOML = @embedFile("smoke.toml");
 
 pub fn main() !u8 {
+
     var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa_state.deinit();
     const gpa = gpa_state.allocator();
@@ -327,11 +273,10 @@ fn report(ok: *bool, result: audit.Result) void {
 
 /// waitForListen() probes readiness by opening a TCP connection and
 /// immediately closing it without sending a request. A spec-correct server
-/// (verified against the authoritative olivertwist/sherlock/watson harness)
 /// treats that as a malformed request and emits one `UNSUPPORTED,,400,0`
 /// audit line per spawn. That phantom is not a workload request -- worse,
 /// left in it corrupts replay filesystem state (its rid collides with the
-/// workload's rid 0). Drop non-GET/PUT ops before the sherlock/watson
+/// workload's rid 0). Drop non-GET/PUT ops before the ordering/replay
 /// checks; no suite workload issues any other method, so this only ever
 /// removes probe noise. Well-formedness still runs over every line.
 fn filterDrivenOps(a: std.mem.Allocator, ops: []const audit.Op) ![]const audit.Op {
@@ -358,7 +303,12 @@ fn makeScratchDir(a: std.mem.Allocator, name: []const u8) !Scratch {
     for (sanitized_name) |*c| {
         if (c.* == '/' or c.* == '.') c.* = '_';
     }
-    const path = try std.fmt.allocPrint(a, "{s}/ztest-{s}-{d}-{d}", .{ base, sanitized_name, std.time.milliTimestamp(), n });
+    const path = try std.fmt.allocPrint(
+        a,
+        "{s}/ztest-{s}-{d}-{d}",
+        .{ base, sanitized_name, std.time.milliTimestamp(), n }
+    );
+
     try std.fs.makeDirAbsolute(path);
     const dir = try std.fs.openDirAbsolute(path, .{});
     return .{ .path = path, .dir = dir };

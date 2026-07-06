@@ -17,6 +17,14 @@ threads**. `-t` defaults to 3 workers (4 OS threads total). See
 `docs/DECISIONS.md` D17 for the thread-count convention and the
 `test_scripts/threads_custom.sh` gate.
 
+## Setup
+
+Fresh clone/extract? Run `./bootstrap.sh` — it verifies `test_files/`
+(regenerating `large_binary.dat`, which isn't shipped in the repo since it's
+1.1GB of disposable random padding), checks the toolchain (or tells you to
+`nix develop` if Nix is on PATH but you're not in the shell), builds, and runs
+`test_repo.sh`. Safe to re-run.
+
 ## Build
 
 ```bash
