@@ -32,6 +32,13 @@ It must be run from the repo root: it reads `workloads/*.toml` and
   real file in `workloads/`.
 - **`ztest/src/wire.zig`** — HTTP/1.1 wire-format helpers (status-line /
   request-line / header parsing) shared by the driver and the mock server.
+- **`ztest/src/events.zig`** — typed workload events: decodes the parsed
+  `toml.Table` list into a validated `Event` union once (with defaults:
+  `method="GET"`, `seconds=4`, `size=4096`), so the driver, the audit
+  checks, and `bench/differential.zig` all switch on typed payloads. All
+  Zig tools share ONE `ztest` module instance (see `build.zig`), which is
+  also what lets the bench differential reuse `oliver.zig`'s Driver
+  instead of carrying a copy.
 - **`ztest/src/oliver.zig`** — the workload driver: opens raw TCP
   connections, replays `CREATE`/`SEND_LINE`/`SEND_HEADERS`/`SEND_BODY`/
   `SEND_ALL`/`RECV_PARTIAL`/`WAIT`/`LOAD`/`UNLOAD`/`SLEEP` events against a
@@ -90,6 +97,11 @@ It must be run from the repo root: it reads `workloads/*.toml` and
   implemented in ztest at all yet.
 - **`APPEND`** (a method `watson.py`'s `Connect` class supports generically)
   is never used by any workload in `workloads/` and isn't implemented here.
+- **Malformed workloads fail at decode time**, before any connection is
+  opened (`events.decode` reports the event index and missing field),
+  whereas olivertwist.py failed lazily mid-run. All checked-in workloads
+  decode cleanly; `SLEEP` without `seconds` defaults to 4 everywhere
+  (including the bench differential, which used to default to 0).
 
 ## Relationship to `docs/zig-interop.md`
 
